@@ -1,0 +1,331 @@
+import "server-only";
+import { randomBytes } from "node:crypto";
+import { sql } from "./db";
+import { env, demoMode } from "./env";
+import { audit } from "./audit";
+import { MoovinClient } from "./moovin/client";
+import type { ApplicantContext } from "./moovin/types";
+import { isSenderVerified } from "./inbound/dkim";
+import { stripQuoted, type InboundMail } from "./inbound/parse";
+import { dueDate } from "./sla";
+import { searchKnowledge } from "./knowledge";
+import { runClaudeAgent } from "./ai/claude";
+import { runDemoAgent } from "./ai/demo";
+import type { AgentInput, AgentOutput, ProposedAction } from "./ai/types";
+import { sendMail } from "./mailer";
+import { similarity, UNCHANGED_THRESHOLD } from "./similarity";
+import { INTENTS, type ActionType } from "./intents";
+
+const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz"];
+
+function newMessageId(ticketId: number) {
+  return `<ticket-${ticketId}-${randomBytes(6).toString("hex")}@tickets.moovin.de>`;
+}
+
+// System-/interne Absender (Auswertung Zoho-Desk-Export: ~18 % der Tickets) → keine KI, direkt an Menschen
+const SYSTEM_SENDER = /^(no-?reply|noreply|mailer-daemon|postmaster|bounce)[^@]*@|@(moovin\.de|moovinimmobilien\.zohodesk\.com)$|@immobilienscout24\.de$/i;
+
+function trustedAuthServ(): string[] {
+  return (process.env.TRUSTED_AUTHSERV_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+// ---------- Eingang ----------
+
+export async function processInbound(mail: InboundMail, actor = "webhook"): Promise<{ ticketId: number; duplicate: boolean }> {
+  if (!mail.fromEmail || !mail.fromEmail.includes("@")) throw new Error("Absender fehlt");
+
+  if (mail.messageId) {
+    const dup = await sql`select ticket_id from ticket.messages where mail_message_id = ${mail.messageId} and direction = 'in'`;
+    if (dup.length) return { ticketId: Number(dup[0].ticket_id), duplicate: true };
+  }
+
+  const verification = isSenderVerified(mail.authResults, mail.fromEmail, trustedAuthServ());
+  const now = new Date();
+
+  // Threading: 1) eigene Message-ID in In-Reply-To/References, 2) [#T-123] im Betreff, 3) offenes Ticket desselben Absenders < 14 Tage
+  let ticketId: number | null = null;
+  const refMatch = `${mail.inReplyTo ?? ""} ${mail.references ?? ""}`.match(/ticket-(\d+)-[0-9a-f]+@tickets\.moovin\.de/);
+  const subjMatch = mail.subject.match(/\[#T-(\d+)\]/);
+  for (const cand of [refMatch?.[1], subjMatch?.[1]]) {
+    if (!cand) continue;
+    const t = await sql`select id from ticket.tickets where id = ${Number(cand)} and sender_email = ${mail.fromEmail}`;
+    if (t.length) { ticketId = Number(t[0].id); break; }
+  }
+  if (!ticketId) {
+    const t = await sql`select id from ticket.tickets where sender_email = ${mail.fromEmail} and status <> 'geschlossen'
+                        and created_at > now() - interval '14 days' order by created_at desc limit 1`;
+    if (t.length) ticketId = Number(t[0].id);
+  }
+
+  if (!ticketId) {
+    const [t] = await sql`insert into ticket.tickets (sender_email, sender_name, subject, sender_verified, due_at, last_inbound_at)
+      values (${mail.fromEmail}, ${mail.fromName || null}, ${mail.subject || null}, ${verification.verified}, ${dueDate(now)}, ${now}) returning id`;
+    ticketId = Number(t.id);
+  } else {
+    await sql`update ticket.tickets set status = 'neu', sender_verified = ${verification.verified}, last_inbound_at = ${now},
+              due_at = case when status in ('beantwortet','geschlossen','wartet') then ${dueDate(now)} else due_at end,
+              closed_at = null, updated_at = now() where id = ${ticketId}`;
+  }
+
+  const [msg] = await sql`insert into ticket.messages (ticket_id, direction, from_email, from_name, to_email, subject, body_text,
+      mail_message_id, in_reply_to, references_hdr, auth_results, sender_verified)
+    values (${ticketId}, 'in', ${mail.fromEmail}, ${mail.fromName || null}, ${mail.to || env.inboundAddress()}, ${mail.subject || null}, ${mail.text},
+      ${mail.messageId}, ${mail.inReplyTo}, ${mail.references}, ${mail.authResults}, ${verification.verified}) returning id`;
+
+  for (const a of mail.attachments) {
+    await sql`insert into ticket.attachments (message_id, filename, content_type, size_bytes, content)
+              values (${msg.id}, ${a.filename}, ${a.contentType}, ${a.size}, ${Buffer.from(a.contentBase64, "base64")})`;
+  }
+  await audit(actor, "mail_in", { from: mail.fromEmail, attachments: mail.attachments.length, verified: verification.verified, detail: verification.detail }, ticketId);
+
+  await analyzeTicket(ticketId);
+  return { ticketId, duplicate: false };
+}
+
+// ---------- KI-Analyse ----------
+
+export async function analyzeTicket(ticketId: number, actor = "system") {
+  const [ticket] = await sql`select * from ticket.tickets where id = ${ticketId}`;
+  if (!ticket) throw new Error("Ticket nicht gefunden");
+  const msgs = await sql`select * from ticket.messages where ticket_id = ${ticketId} order by created_at asc`;
+  const lastIn = [...msgs].reverse().find((m) => m.direction === "in");
+  if (!lastIn) return;
+  const atts = await sql`select filename, content_type from ticket.attachments where message_id = ${lastIn.id}`;
+
+  if (SYSTEM_SENDER.test(ticket.sender_email)) {
+    await sql`update ticket.tickets set intent = 'intern_system', confidence = null, summary = 'System- oder interne Absenderadresse – keine KI-Verarbeitung.',
+              needs_human = true, needs_human_reason = 'System-/interne Mail', status = 'neu', updated_at = now() where id = ${ticketId}`;
+    await audit("system", "ticket", { event: "system_absender_uebersprungen" }, ticketId);
+    return;
+  }
+
+  const client = new MoovinClient(ticket.sender_email, ticketId);
+  let ctx: ApplicantContext | null = null;
+  let moovinError: string | null = null;
+  try { ctx = await client.getApplicantContext(); } catch (e) { moovinError = (e as Error).message; }
+
+  const allowedObjects = new Set((ctx?.applications ?? []).map((a) => a.object_id));
+  let assignee: string | null = null;
+  let objectTitle: string | null = ctx?.applications[0]?.object_title ?? null;
+  const objectId: string | null = ctx?.applications[0]?.object_id ?? null;
+  if (objectId) {
+    try {
+      const o = await client.getObject(objectId);
+      if (o?.account_manager?.email) {
+        const ag = await sql`select email from ticket.agents where email = ${o.account_manager.email.toLowerCase()} and active`;
+        assignee = ag[0]?.email ?? null;
+      }
+      objectTitle = o?.title ?? objectTitle;
+    } catch { /* AM bleibt leer → Pool */ }
+  }
+
+  const input: AgentInput = {
+    ticketId,
+    senderEmail: ticket.sender_email,
+    senderName: ticket.sender_name ?? "",
+    subject: lastIn.subject ?? "",
+    newMessage: stripQuoted(lastIn.body_text),
+    attachments: atts.map((a) => ({ filename: a.filename, contentType: a.content_type })),
+    history: msgs.filter((m) => m.id !== lastIn.id).map((m) => ({ direction: m.direction, text: m.direction === "in" ? stripQuoted(m.body_text) : m.body_text, at: new Date(m.created_at).toISOString() })),
+    senderVerified: ticket.sender_verified,
+    context: ctx,
+    tools: {
+      getApplicationStatus: async () => ctx,
+      getObjectInfo: async (id) => (allowedObjects.has(id) ? client.getObject(id) : null),
+      searchKnowledge: async (q) => (await searchKnowledge(q, [...allowedObjects])).map((h) => ({ title: h.title, body: h.body, scope: h.scope === "global" ? "allgemein" : `Objekt ${h.object_id}` })),
+    },
+  };
+
+  let out: AgentOutput;
+  let aiError: string | null = null;
+  try {
+    out = demoMode() ? await runDemoAgent(input) : await runClaudeAgent(input);
+  } catch (e) {
+    aiError = (e as Error).message;
+    out = await runDemoAgent(input);
+    out.result.needs_human = true;
+    out.result.needs_human_reason = `KI-Fehler, Fallback auf Regeln: ${aiError}`.slice(0, 300);
+    out.result.confidence = Math.min(out.result.confidence, 0.3);
+  }
+  const r = out.result;
+  if (!INTENTS.includes(r.intent)) r.intent = "sonstiges";
+  r.confidence = Math.max(0, Math.min(1, Number(r.confidence) || 0));
+  if (moovinError) { r.needs_human = true; r.needs_human_reason = `moovin nicht erreichbar: ${moovinError}`; }
+
+  // Aktionen serverseitig prüfen: nur IDs aus dem Kontext dieses Absenders, keine Duplikate.
+  const appIds = new Set((ctx?.applications ?? []).map((a) => a.id));
+  const apptIds = new Set((ctx?.applications ?? []).map((a) => a.appointment?.id).filter(Boolean) as string[]);
+  const seen = new Set<string>();
+  const valid: ProposedAction[] = [];
+  for (const a of r.actions ?? []) {
+    if (!ctx) break;
+    if (!WRITE_ACTIONS.includes(a.type)) continue;
+    if (["termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch"].includes(a.type) && !apptIds.has(a.appointment_id)) continue;
+    if (["dokumente_ablegen", "interesse_setzen", "notiz"].includes(a.type) && !appIds.has(a.application_id)) continue;
+    if (a.type === "dokumente_ablegen" && !atts.length) continue;
+    if (a.type === "interesse_setzen" && !["interessiert", "zurueckgezogen"].includes(a.interest)) continue;
+    const k = `${a.type}:${a.application_id}:${a.appointment_id}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    valid.push(a);
+  }
+
+  await sql`update ticket.drafts set status = 'ersetzt' where ticket_id = ${ticketId} and status = 'offen'`;
+  await sql`update ticket.actions set status = 'verworfen' where ticket_id = ${ticketId} and status in ('vorgeschlagen','blockiert')`;
+
+  const [draft] = await sql`insert into ticket.drafts (ticket_id, in_message_id, model, body_text, analysis, usage)
+    values (${ticketId}, ${lastIn.id}, ${out.model}, ${r.reply_text}, ${sql.json({ ...r, toolCalls: out.toolCalls, aiError } as never)}, ${out.usage ? sql.json(out.usage) : null})
+    returning id`;
+
+  for (const a of valid) {
+    const blocked = !ticket.sender_verified;
+    const label = actionLabel(a, ctx);
+    await sql`insert into ticket.actions (ticket_id, draft_id, type, payload, label, status, blocked_reason, idempotency_key)
+      values (${ticketId}, ${draft.id}, ${a.type}, ${sql.json(a as never)}, ${label}, ${blocked ? "blockiert" : "vorgeschlagen"},
+              ${blocked ? "Absender nicht verifiziert (DKIM/DMARC) – Aktion bitte manuell in moovin prüfen" : null},
+              ${`t${ticketId}-m${lastIn.id}-${a.type}-${a.application_id || a.appointment_id}`})
+      on conflict (idempotency_key) do update set status = excluded.status, draft_id = excluded.draft_id, payload = excluded.payload`;
+  }
+
+  // Objekt/Bewerbung für Anzeige: aus Aktion, sonst erste Bewerbung
+  const focusApp = ctx?.applications.find((a) => valid.some((v) => v.application_id === a.id || v.appointment_id === a.appointment?.id)) ?? ctx?.applications[0];
+
+  const [setting] = await sql`select * from ticket.intent_settings where intent = ${r.intent}`;
+  const auto =
+    !!setting && setting.mode === "auto" && !setting.locked &&
+    r.confidence >= Number(setting.threshold) && !r.needs_human && !!ctx && !!r.reply_text.trim() &&
+    (valid.length === 0 || ticket.sender_verified) && !aiError && !moovinError;
+
+  await sql`update ticket.tickets set
+      intent = ${r.intent}, language = ${r.language}, confidence = ${r.confidence}, summary = ${r.summary},
+      needs_human = ${r.needs_human}, needs_human_reason = ${r.needs_human_reason || null},
+      applicant_id = ${ctx?.applicant.id ?? null}, applicant_known = ${!!ctx}, reply_to_email = ${ctx?.applicant.email?.toLowerCase() ?? null},
+      application_id = ${focusApp?.id ?? null}, object_id = ${focusApp?.object_id ?? objectId}, object_title = ${focusApp?.object_title ?? objectTitle},
+      assignee_email = coalesce(assignee_email, ${assignee}),
+      status = 'entwurf', updated_at = now()
+    where id = ${ticketId}`;
+
+  await audit(actor === "system" ? "ki" : actor, "ki_call", { model: out.model, intent: r.intent, confidence: r.confidence, needs_human: r.needs_human, tools: out.toolCalls, usage: out.usage, aiError, auto }, ticketId);
+
+  if (auto) {
+    const acts = await sql`select id from ticket.actions where draft_id = ${draft.id} and status = 'vorgeschlagen'`;
+    await sendDraft({ ticketId, draftId: Number(draft.id), actor: "ki", finalText: r.reply_text, actionIds: acts.map((a) => Number(a.id)) });
+  }
+}
+
+function actionLabel(a: ProposedAction, ctx: ApplicantContext | null): string {
+  const app = ctx?.applications.find((x) => x.id === a.application_id || x.appointment?.id === a.appointment_id);
+  const when = app?.appointment ? new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", dateStyle: "short", timeStyle: "short" }).format(new Date(app.appointment.starts_at)) : "";
+  switch (a.type) {
+    case "dokumente_ablegen": return `Anhänge an Bewerbung ${a.application_id} (${app?.object_title ?? ""}) ablegen`;
+    case "termin_bestaetigen": return `Teilnahme am Termin ${when} bestätigen`;
+    case "termin_absagen": return `Termin ${when} absagen und Slot freigeben`;
+    case "termin_verschieben_wunsch": return `Verschiebe-Wunsch für Termin ${when} an AM: „${a.text.slice(0, 120)}“`;
+    case "interesse_setzen": return a.interest === "zurueckgezogen" ? `Bewerbung ${a.application_id} zurückziehen` : `Interesse für ${a.application_id} bestätigen`;
+    case "notiz": return `Notiz: „${a.text.slice(0, 140)}“`;
+  }
+}
+
+// ---------- Versand & Aktionen ----------
+
+export async function sendDraft(opts: { ticketId: number; draftId: number; actor: string; finalText: string; actionIds: number[] }) {
+  const { ticketId, draftId, actor, finalText, actionIds } = opts;
+  const [ticket] = await sql`select * from ticket.tickets where id = ${ticketId}`;
+  const [draft] = await sql`select * from ticket.drafts where id = ${draftId} and ticket_id = ${ticketId}`;
+  if (!ticket || !draft) throw new Error("Ticket/Entwurf nicht gefunden");
+  if (draft.status !== "offen") throw new Error("Entwurf wurde bereits bearbeitet");
+  if (!finalText.trim()) throw new Error("Antwort ist leer");
+  if (/\[AM:/.test(finalText)) throw new Error("Antwort enthält noch [AM: …]-Platzhalter");
+
+  // Empfänger: IMMER die in moovin hinterlegte Adresse; unbekannte Absender bekommen nur generische Antworten an ihre Absenderadresse
+  const to = ticket.reply_to_email ?? ticket.sender_email;
+  const lastIn = (await sql`select * from ticket.messages where ticket_id = ${ticketId} and direction = 'in' order by created_at desc limit 1`)[0];
+  const baseSubject = String(ticket.subject ?? "Ihre Anfrage").replace(/\s*\[#T-\d+\]/g, "").replace(/^((re|aw|wg|fwd?):\s*)+/i, "");
+  const subject = `Re: ${baseSubject} [#T-${ticketId}]`;
+  const messageId = newMessageId(ticketId);
+  const references = [lastIn?.references_hdr, lastIn?.mail_message_id].filter(Boolean).join(" ") || null;
+
+  const delivery = await sendMail({ to, subject, text: finalText, inReplyTo: lastIn?.mail_message_id ?? null, references, messageId, ticketId });
+
+  await sql`insert into ticket.messages (ticket_id, direction, from_email, to_email, subject, body_text, mail_message_id, in_reply_to, references_hdr, sent_by, delivery_status)
+    values (${ticketId}, 'out', ${env.inboundAddress()}, ${to}, ${subject}, ${finalText}, ${messageId}, ${lastIn?.mail_message_id ?? null}, ${references}, ${actor}, ${delivery})`;
+
+  const sim = similarity(draft.body_text, finalText);
+  await sql`update ticket.drafts set status = 'gesendet', final_text = ${finalText}, similarity = ${sim}, unchanged = ${sim >= UNCHANGED_THRESHOLD},
+            decided_by = ${actor}, decided_at = now() where id = ${draftId}`;
+
+  // Aktionen: ausgewählte ausführen, übrige verwerfen
+  const acts = await sql`select * from ticket.actions where draft_id = ${draftId}`;
+  const results: { id: number; ok: boolean; error?: string }[] = [];
+  for (const a of acts) {
+    if (a.status !== "vorgeschlagen") continue;
+    if (!actionIds.includes(Number(a.id))) {
+      await sql`update ticket.actions set status = 'verworfen', executed_by = ${actor}, executed_at = now() where id = ${a.id}`;
+      continue;
+    }
+    results.push(await executeAction(Number(a.id), actor));
+  }
+
+  await sql`update ticket.tickets set status = 'beantwortet', auto_handled = ${actor === "ki"},
+            first_response_at = coalesce(first_response_at, now()), updated_at = now() where id = ${ticketId}`;
+  await audit(actor, "ticket", { event: "beantwortet", draftId, delivery, similarity: sim, actions: results }, ticketId);
+  return { delivery, results };
+}
+
+export async function executeAction(actionId: number, actor: string): Promise<{ id: number; ok: boolean; error?: string }> {
+  const [a] = await sql`select a.*, t.sender_email, t.sender_verified from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
+  if (!a) return { id: actionId, ok: false, error: "nicht gefunden" };
+  if (a.status !== "vorgeschlagen") return { id: actionId, ok: false, error: `Status ${a.status}` };
+  if (!a.sender_verified) {
+    await sql`update ticket.actions set status = 'blockiert', blocked_reason = 'Absender nicht verifiziert' where id = ${actionId}`;
+    return { id: actionId, ok: false, error: "Absender nicht verifiziert" };
+  }
+  const p = a.payload as ProposedAction;
+  const client = new MoovinClient(a.sender_email, Number(a.ticket_id));
+  const src = `T-${a.ticket_id}`;
+  try {
+    let result: unknown;
+    switch (a.type as ActionType) {
+      case "dokumente_ablegen": {
+        const [d] = await sql`select in_message_id from ticket.drafts where id = ${a.draft_id}`;
+        const files = await sql`select id, filename, content_type, content from ticket.attachments where message_id = ${d.in_message_id}`;
+        result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/documents`, {
+          source_ticket_id: src,
+          files: files.map((f) => ({ filename: f.filename, content_type: f.content_type, content_base64: Buffer.from(f.content).toString("base64") })),
+        }, a.idempotency_key);
+        await sql`update ticket.attachments set forwarded_at = now() where message_id = ${d.in_message_id}`;
+        break;
+      }
+      case "termin_bestaetigen":
+        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/confirm`, { source_ticket_id: src }, a.idempotency_key);
+        break;
+      case "termin_absagen":
+        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/cancel`, { source_ticket_id: src, comment: "Absage per Mail" }, a.idempotency_key);
+        break;
+      case "termin_verschieben_wunsch":
+        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/reschedule-request`, { source_ticket_id: src, wish: p.text || "Verschiebung gewünscht" }, a.idempotency_key);
+        break;
+      case "interesse_setzen":
+        result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/interest`, { source_ticket_id: src, interest: p.interest }, a.idempotency_key);
+        break;
+      case "notiz":
+        result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/notes`, { source_ticket_id: src, text: String(p.text || "Mail ohne Zusammenfassung").slice(0, 4000), ticket_url: `${env.appUrl()}/tickets/${a.ticket_id}` }, a.idempotency_key);
+        break;
+    }
+    await sql`update ticket.actions set status = 'ausgefuehrt', result = ${sql.json((result ?? {}) as never)}, executed_by = ${actor}, executed_at = now() where id = ${actionId}`;
+    await audit(actor, "action", { type: a.type, ok: true }, Number(a.ticket_id));
+    return { id: actionId, ok: true };
+  } catch (e) {
+    const msg = (e as Error).message;
+    await sql`update ticket.actions set status = 'fehler', result = ${sql.json({ error: msg })}, executed_by = ${actor}, executed_at = now() where id = ${actionId}`;
+    await audit(actor, "action", { type: a.type, ok: false, error: msg }, Number(a.ticket_id));
+    return { id: actionId, ok: false, error: msg };
+  }
+}
+
+export async function closeTicket(ticketId: number, actor: string) {
+  await sql`update ticket.drafts set status = 'verworfen', decided_by = ${actor}, decided_at = now() where ticket_id = ${ticketId} and status = 'offen'`;
+  await sql`update ticket.actions set status = 'verworfen' where ticket_id = ${ticketId} and status in ('vorgeschlagen','blockiert')`;
+  await sql`update ticket.tickets set status = 'geschlossen', closed_at = now(), updated_at = now() where id = ${ticketId}`;
+  await audit(actor, "ticket", { event: "geschlossen" }, ticketId);
+}
