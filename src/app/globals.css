@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy: #001e46;
+  --color-navy-700: #0b2f63;
+  --color-pink: #ff0a55;
+  --color-pink-50: #fff0f4;
+  --color-ink: #1b2433;
+  --color-muted: #5b6475;
+  --color-line: #e3e7ee;
+  --color-canvas: #f6f7fa;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+
+@utility card { @apply bg-white border border-line rounded-xl; }
+@utility btn { @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed; }
+@utility btn-primary { @apply btn bg-navy text-white hover:bg-navy-700; }
+@utility btn-pink { @apply btn bg-pink text-white hover:brightness-95; }
+@utility btn-ghost { @apply btn border border-line bg-white text-ink hover:bg-canvas; }
+@utility input { @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-sm outline-none focus:border-navy focus:ring-2 focus:ring-navy/10; }
+@utility label { @apply block text-xs font-semibold uppercase tracking-wide text-muted mb-1; }
+@utility badge { @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap; }
