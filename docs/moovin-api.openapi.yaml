@@ -1,0 +1,270 @@
+openapi: 3.1.0
+info:
+  title: moovin Ticket-API
+  version: 1.0.0
+  description: |
+    Schmale, zweckgebundene Schnittstelle zwischen app.moovin.de und dem moovin Ticketsystem.
+    Umsetzung auf moovin-Seite: IT (Guido). Im Prototyp existiert eine Attrappe unter /api/mock-moovin/v1.
+
+    ## Sicherheit
+    - Nur Server-zu-Server. Jede Anfrage ist HMAC-SHA256-signiert:
+      `signature = hex(HMAC_SHA256(secret, timestamp + "\n" + METHOD + "\n" + path_with_query + "\n" + sha256_hex(body)))`
+      Header: `X-Moovin-Key-Id`, `X-Moovin-Timestamp` (Unix-Sekunden), `X-Moovin-Signature`.
+      moovin lehnt ab, wenn |jetzt − timestamp| > 300 s oder die Signatur nicht passt (constant-time compare).
+    - Zusätzlich IP-Allowlist (feste Ausgangs-IPs des Ticketsystems).
+    - Jede Anfrage trägt `X-Subject-Email` = Mailadresse des Absenders. moovin MUSS prüfen, dass jede
+      angefragte bzw. veränderte Ressource (Bewerbung, Termin, Objekt) zu dieser Mailadresse gehört → sonst 404.
+      Damit kann selbst ein fehlerhaftes Ticketsystem keine fremden Daten lesen oder ändern.
+    - Schreibende Aufrufe tragen `Idempotency-Key`; Wiederholungen mit gleichem Key liefern das erste Ergebnis.
+    - Mehrere Schlüssel gleichzeitig gültig (Rotation über `X-Moovin-Key-Id`).
+    - moovin protokolliert jeden Aufruf (Key-Id, Pfad, Subject-Email, Ergebnis).
+    - Statuscodes: 401 Signatur/Zeitstempel/Key-Id ungültig · 400 Pflicht-Header oder Eingabe ungültig
+      (z. B. fehlender `Idempotency-Key`, unbekannter `interest`-Wert) · 404 Ressource unbekannt ODER gehört nicht zur
+      `X-Subject-Email` (bewusst nicht unterscheidbar) · 409 Zustand passt nicht (Termin vergangen/abgesagt).
+    - Konformitätstest: `scripts/api-check.ts` prüft eine Implementierung gegen diesen Vertrag.
+
+    ## Datenminimierung
+    Die API liefert **keine** Scores, Rankings, Ablehnungsgründe, Einkommensdaten oder Dokumentinhalte.
+servers:
+  - url: https://app.moovin.de/api/ticket/v1
+    description: Produktion (Vorschlag)
+  - url: /api/mock-moovin/v1
+    description: Attrappe im Prototyp
+security:
+  - hmac: []
+components:
+  securitySchemes:
+    hmac:
+      type: apiKey
+      in: header
+      name: X-Moovin-Signature
+  parameters:
+    SubjectEmail:
+      name: X-Subject-Email
+      in: header
+      required: true
+      schema: { type: string, format: email }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 200 }
+  schemas:
+    Applicant:
+      type: object
+      required: [id, email, first_name, last_name]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email, description: Hinterlegte Adresse – Antworten gehen nur hierhin }
+        salutation: { type: string, enum: [Herr, Frau, divers, ""] }
+        first_name: { type: string }
+        last_name: { type: string }
+        preferred_language: { type: string, example: de }
+    Appointment:
+      type: object
+      required: [id, starts_at, status]
+      properties:
+        id: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        kind: { type: string, enum: [sammelbesichtigung, einzelbesichtigung, uebergabe] }
+        status: { type: string, enum: [eingeladen, bestaetigt, abgesagt, stattgefunden, no_show] }
+        meeting_point: { type: string, description: Treffpunkt/Adresse für Besichtigung }
+    Application:
+      type: object
+      required: [id, object_id, status, status_label]
+      properties:
+        id: { type: string }
+        object_id: { type: string }
+        object_title: { type: string }
+        status:
+          type: string
+          enum: [eingegangen, unvollstaendig, in_pruefung, eingeladen, besichtigt, beim_eigentuemer, zusage, absage, zurueckgezogen]
+        status_label: { type: string, description: Bewerber-taugliche Formulierung des Status }
+        missing_documents:
+          type: array
+          items: { type: string, example: Gehaltsnachweise der letzten 3 Monate }
+        next_step: { type: string, description: Bewerber-taugliche Beschreibung des nächsten Schritts }
+        appointment: { $ref: '#/components/schemas/Appointment' }
+        created_at: { type: string, format: date-time }
+    ApplicantContext:
+      type: object
+      required: [applicant, applications]
+      properties:
+        applicant: { $ref: '#/components/schemas/Applicant' }
+        applications:
+          type: array
+          items: { $ref: '#/components/schemas/Application' }
+    ObjectInfo:
+      type: object
+      required: [id, title, address]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        address: { type: string }
+        district: { type: string }
+        city: { type: string }
+        rooms: { type: number }
+        size_sqm: { type: number }
+        rent_cold_eur: { type: number }
+        rent_warm_eur: { type: number }
+        available_from: { type: string, format: date }
+        pets: { type: string, example: Kleintiere erlaubt, Hunde nach Absprache }
+        parking: { type: string }
+        wbs_required: { type: boolean }
+        viewing_info: { type: string, description: Ablauf der Besichtigung, Treffpunkt, Mitzubringendes }
+        application_info: { type: string, description: Ablauf der Bewerbung, benötigte Unterlagen }
+        listing_url: { type: string, format: uri }
+        account_manager:
+          type: object
+          properties:
+            name: { type: string }
+            email: { type: string, format: email }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+paths:
+  /applicants:
+    get:
+      summary: Bewerber-Kontext zu einer Mailadresse
+      description: Liefert Bewerber und alle seine Bewerbungen inkl. Termine. Schlüssel ist die Mailadresse (case-insensitive).
+      parameters:
+        - $ref: '#/components/parameters/SubjectEmail'
+        - name: email
+          in: query
+          required: true
+          schema: { type: string, format: email }
+          description: Muss identisch mit X-Subject-Email sein.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ApplicantContext' } } } }
+        '404': { description: Unbekannte Adresse }
+  /objects/{objectId}:
+    get:
+      summary: Objektinfos für Antworten und Wissensdatenbank
+      parameters:
+        - $ref: '#/components/parameters/SubjectEmail'
+        - { name: objectId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ObjectInfo' } } } }
+        '404': { description: Unbekannt oder Subject hat sich nicht auf dieses Objekt beworben }
+  /applications/{applicationId}/documents:
+    post:
+      summary: Anhänge ungelesen an die Bewerbung hängen
+      parameters:
+        - $ref: '#/components/parameters/SubjectEmail'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - { name: applicationId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [files, source_ticket_id]
+              properties:
+                source_ticket_id: { type: string }
+                files:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: object
+                    required: [filename, content_type, content_base64]
+                    properties:
+                      filename: { type: string }
+                      content_type: { type: string }
+                      content_base64: { type: string, description: max. 15 MB je Datei }
+      responses:
+        '201': { description: Abgelegt (Status „neu, unsortiert“) }
+  /appointments/{appointmentId}/confirm:
+    post:
+      summary: Teilnahme am Termin bestätigen (Antwort auf „Rückmeldung erforderlich“)
+      parameters:
+        - $ref: '#/components/parameters/SubjectEmail'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - { name: appointmentId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_ticket_id]
+              properties:
+                source_ticket_id: { type: string }
+      responses:
+        '200': { description: Bestätigt }
+        '409': { description: Termin abgesagt oder vergangen }
+  /appointments/{appointmentId}/cancel:
+    post:
+      summary: Termin absagen (Slot wird frei)
+      parameters:
+        - $ref: '#/components/parameters/SubjectEmail'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - { name: appointmentId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_ticket_id]
+              properties:
+                source_ticket_id: { type: string }
+                comment: { type: string }
+      responses:
+        '200': { description: Abgesagt }
+        '409': { description: Termin liegt in der Vergangenheit oder ist bereits abgesagt }
+  /appointments/{appointmentId}/reschedule-request:
+    post:
+      summary: Verschiebe-Wunsch an AM übermitteln (keine automatische Umbuchung in V1)
+      parameters:
+        - $ref: '#/components/parameters/SubjectEmail'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - { name: appointmentId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_ticket_id, wish]
+              properties:
+                source_ticket_id: { type: string }
+                wish: { type: string, example: Lieber am Samstagvormittag }
+      responses:
+        '201': { description: Wunsch erfasst }
+  /applications/{applicationId}/interest:
+    post:
+      summary: Interesse bestätigen oder Bewerbung zurückziehen
+      parameters:
+        - $ref: '#/components/parameters/SubjectEmail'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - { name: applicationId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_ticket_id, interest]
+              properties:
+                source_ticket_id: { type: string }
+                interest: { type: string, enum: [interessiert, zurueckgezogen] }
+      responses:
+        '200': { description: Gesetzt }
+  /applications/{applicationId}/notes:
+    post:
+      summary: Notiz am Bewerber (Zusammenfassung der Mail für den AM)
+      parameters:
+        - $ref: '#/components/parameters/SubjectEmail'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - { name: applicationId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_ticket_id, text]
+              properties:
+                source_ticket_id: { type: string }
+                text: { type: string, maxLength: 4000 }
+                ticket_url: { type: string, format: uri }
+      responses:
+        '201': { description: Angelegt }
