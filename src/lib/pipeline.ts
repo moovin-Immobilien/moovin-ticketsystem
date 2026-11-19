@@ -16,7 +16,10 @@ import { sendMail } from "./mailer";
 import { similarity, UNCHANGED_THRESHOLD } from "./similarity";
 import { INTENTS, type ActionType } from "./intents";
 
-const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz"];
+const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz", "datenschutz_weiterleiten"];
+// Interne Weiterleitung (kein Schreibzugriff auf moovin): auch bei unbekanntem oder nicht verifiziertem Absender erlaubt.
+// Das Datenschutzteam prüft die Identität selbst; der Verifizierungsstatus steht in der Weiterleitung.
+const INTERNAL_ACTIONS: ActionType[] = ["datenschutz_weiterleiten"];
 
 function newMessageId(ticketId: number) {
   return `<ticket-${ticketId}-${randomBytes(6).toString("hex")}@tickets.moovin.de>`;
@@ -158,8 +161,12 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
   const seen = new Set<string>();
   const valid: ProposedAction[] = [];
   for (const a of r.actions ?? []) {
-    if (!ctx) break;
     if (!WRITE_ACTIONS.includes(a.type)) continue;
+    if (INTERNAL_ACTIONS.includes(a.type)) {
+      if (!seen.has(a.type)) { seen.add(a.type); valid.push({ ...a, application_id: "", appointment_id: "", interest: "" }); }
+      continue;
+    }
+    if (!ctx) continue;
     if (["termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch"].includes(a.type) && !apptIds.has(a.appointment_id)) continue;
     if (["dokumente_ablegen", "interesse_setzen", "notiz"].includes(a.type) && !appIds.has(a.application_id)) continue;
     if (a.type === "dokumente_ablegen" && !atts.length) continue;
@@ -178,7 +185,7 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
     returning id`;
 
   for (const a of valid) {
-    const blocked = !ticket.sender_verified;
+    const blocked = !ticket.sender_verified && !INTERNAL_ACTIONS.includes(a.type);
     const label = actionLabel(a, ctx);
     await sql`insert into ticket.actions (ticket_id, draft_id, type, payload, label, status, blocked_reason, idempotency_key)
       values (${ticketId}, ${draft.id}, ${a.type}, ${sql.json(a as never)}, ${label}, ${blocked ? "blockiert" : "vorgeschlagen"},
@@ -223,6 +230,7 @@ function actionLabel(a: ProposedAction, ctx: ApplicantContext | null): string {
     case "termin_verschieben_wunsch": return `Verschiebe-Wunsch für Termin ${when} an AM: „${a.text.slice(0, 120)}“`;
     case "interesse_setzen": return a.interest === "zurueckgezogen" ? `Bewerbung ${a.application_id} zurückziehen` : `Interesse für ${a.application_id} bestätigen`;
     case "notiz": return `Notiz: „${a.text.slice(0, 140)}“`;
+    case "datenschutz_weiterleiten": return `An ${env.datenschutzAddress()} weiterleiten${a.text ? `: „${a.text.slice(0, 120)}“` : ""}`;
   }
 }
 
@@ -276,7 +284,7 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
   const [a] = await sql`select a.*, t.sender_email, t.sender_verified from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
   if (!a) return { id: actionId, ok: false, error: "nicht gefunden" };
   if (a.status !== "vorgeschlagen") return { id: actionId, ok: false, error: `Status ${a.status}` };
-  if (!a.sender_verified) {
+  if (!a.sender_verified && !INTERNAL_ACTIONS.includes(a.type)) {
     await sql`update ticket.actions set status = 'blockiert', blocked_reason = 'Absender nicht verifiziert' where id = ${actionId}`;
     return { id: actionId, ok: false, error: "Absender nicht verifiziert" };
   }
@@ -308,6 +316,28 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
       case "interesse_setzen":
         result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/interest`, { source_ticket_id: src, interest: p.interest }, a.idempotency_key);
         break;
+      case "datenschutz_weiterleiten": {
+        const [m] = await sql`select m.from_email, m.from_name, m.subject, m.body_text, m.created_at, m.sender_verified
+                              from ticket.drafts d join ticket.messages m on m.id = d.in_message_id where d.id = ${a.draft_id}`;
+        const to = env.datenschutzAddress();
+        const text = [
+          "Weitergeleitete Datenschutzanfrage aus dem moovin Ticketsystem.",
+          "",
+          `Ticket: ${env.appUrl()}/tickets/${a.ticket_id}`,
+          `Absender: ${m?.from_name ? `${m.from_name} ` : ""}<${m?.from_email ?? a.sender_email}>`,
+          `Absender verifiziert (DKIM/DMARC): ${m?.sender_verified ? "ja" : "nein – Identität bitte vor Löschung/Auskunft prüfen"}`,
+          `Eingang: ${m?.created_at ? new Date(m.created_at).toISOString() : "–"}`,
+          p.text ? `Zusammenfassung: ${p.text}` : "",
+          "",
+          `Betreff: ${m?.subject ?? ""}`,
+          "----- Originalnachricht -----",
+          String(m?.body_text ?? "").slice(0, 20_000),
+        ].join("\n");
+        const delivery = await sendMail({ to, subject: `[Datenschutz] Anfrage von ${a.sender_email} [#T-${a.ticket_id}]`, text, messageId: newMessageId(Number(a.ticket_id)), ticketId: Number(a.ticket_id) });
+        if (delivery === "fehler") throw new Error(`Weiterleitung an ${to} fehlgeschlagen`);
+        result = { forwarded_to: to, delivery };
+        break;
+      }
       case "notiz":
         result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/notes`, { source_ticket_id: src, text: String(p.text || "Mail ohne Zusammenfassung").slice(0, 4000), ticket_url: `${env.appUrl()}/tickets/${a.ticket_id}` }, a.idempotency_key);
         break;
