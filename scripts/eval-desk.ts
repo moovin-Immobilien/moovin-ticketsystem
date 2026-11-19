@@ -35,7 +35,7 @@ async function run(m: (typeof mails)[number]) {
     `Heute: Mittwoch, 18. November 2026\nAbsender in moovin bekannt: ja (Testkontext)\nAbsender verifiziert: ja\nAnhänge: keine\n\nNeue Mail – Betreff: ${m.subject}\n<email>\n${m.body}\n</email>\n\nErstelle Analyse und Antwortentwurf gemäß Vorgaben.` }];
   const usage = { i: 0, o: 0, cr: 0, cw: 0 }; const tools: string[] = []; let kbHits = 0;
   for (let t = 0; t < 6; t++) {
-    const res = await client.messages.create({ model, max_tokens: 6000, system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+    const res = await client.messages.create({ model, max_tokens: 12000, system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
       tools: TOOLS, messages, output_config: { effort: "medium", format: { type: "json_schema", schema: OUTPUT_SCHEMA as unknown as Record<string, unknown> } } });
     usage.i += res.usage.input_tokens; usage.o += res.usage.output_tokens; usage.cr += res.usage.cache_read_input_tokens ?? 0; usage.cw += res.usage.cache_creation_input_tokens ?? 0;
     if (res.stop_reason === "tool_use") {
@@ -52,7 +52,13 @@ async function run(m: (typeof mails)[number]) {
       messages.push({ role: "user", content: results }); continue;
     }
     const text = res.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");
-    return { n: m.n, subject: m.subject, body: m.body, result: JSON.parse(text), tools, kbHits, usage };
+    let result: unknown;
+    try { result = JSON.parse(text); } catch {
+      messages.push({ role: "assistant", content: res.content });
+      messages.push({ role: "user", content: "Deine letzte Ausgabe war kein vollständiges JSON. Gib die Analyse jetzt erneut, kurz und vollständig, als gültiges JSON gemäß Schema aus." });
+      continue;
+    }
+    return { n: m.n, subject: m.subject, body: m.body, result, tools, kbHits, usage };
   }
   throw new Error("zu viele Runden");
 }
