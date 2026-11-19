@@ -75,7 +75,7 @@ Sonst: Entwurf → Freigabe-Queue des zuständigen AM.
 
 ### 4.5 Aktionen in moovin
 Ausgeführt bei Freigabe durch AM (oder im Auto-Modus). Jede Aktion ist idempotent (`Idempotency-Key` = Ticket-ID + Aktion).
-- Dokumente ablegen → `POST /applications/{id}/documents` (Anhänge base64, ungelesen)
+- Dokumente ablegen → `POST /applicants/{id}/documents` (im Bewerberprofil, gilt für alle Bewerbungen; Anhänge base64, ungelesen)
 - Termin zusagen / absagen / Verschiebewunsch → `POST /appointments/{id}/reply` (`answer` = `zusage` | `absage` | `verschieben`)
 - Rückzug, Interesse, sonstige Hinweise → `POST /applications/{id}/notes` (AM setzt den Status in moovin)
 
