@@ -23,6 +23,8 @@ export const env = {
   // Inbound-Webhook
   inboundToken: () => req("INBOUND_WEBHOOK_TOKEN"),
   inboundAddress: () => process.env.INBOUND_ADDRESS ?? "mieter@moovin.de",
+  // Löschungs-/Auskunftsanfragen nach DSGVO werden hierhin weitergeleitet
+  datenschutzAddress: () => process.env.DATENSCHUTZ_ADDRESS ?? "datenschutz@moovin.de",
   // Ausgang
   postmarkToken: () => process.env.POSTMARK_SERVER_TOKEN ?? "",
   fromAddress: () => process.env.MAIL_FROM ?? "moovin Vermietung <mieter@moovin.de>",

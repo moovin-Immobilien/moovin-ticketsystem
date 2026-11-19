@@ -25,7 +25,7 @@ export const INTENT_LABEL: Record<Intent, string> = {
   spam: "Spam",
 };
 
-export const ACTION_TYPES = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz"] as const;
+export const ACTION_TYPES = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz", "datenschutz_weiterleiten"] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
 
 export const ACTION_LABEL: Record<ActionType, string> = {
@@ -35,4 +35,5 @@ export const ACTION_LABEL: Record<ActionType, string> = {
   termin_verschieben_wunsch: "Verschiebe-Wunsch an AM übermitteln",
   interesse_setzen: "Interesse/Rückzug in moovin setzen",
   notiz: "Notiz am Bewerber anlegen",
+  datenschutz_weiterleiten: "Anfrage an das Datenschutzteam weiterleiten",
 };
