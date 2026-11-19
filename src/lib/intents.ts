@@ -1,6 +1,7 @@
 export const INTENTS = [
   "bewerbungsstatus", "unterlagen_nachreichen", "termin_bestaetigen", "termin_absage", "termin_verschieben", "besichtigung_frage",
-  "objekt_frage", "interesse_bestaetigen", "rueckzug", "beschwerde", "nicht_zustaendig", "intern_system", "sonstiges", "spam",
+  "objekt_frage", "interesse_bestaetigen", "rueckzug", "wohnungssuche_allgemein", "konto_datenschutz", "technik_login",
+  "beschwerde", "nicht_zustaendig", "intern_system", "sonstiges", "spam",
 ] as const;
 export type Intent = (typeof INTENTS)[number];
 
@@ -14,6 +15,9 @@ export const INTENT_LABEL: Record<Intent, string> = {
   objekt_frage: "Frage zum Objekt",
   interesse_bestaetigen: "Interesse bestätigen",
   rueckzug: "Bewerbung zurückziehen",
+  wohnungssuche_allgemein: "Allgemeine Wohnungssuche",
+  konto_datenschutz: "Konto / Daten löschen",
+  technik_login: "Technik / Login / Profil",
   beschwerde: "Beschwerde",
   nicht_zustaendig: "Nicht zuständig",
   intern_system: "System-/interne Mail",
