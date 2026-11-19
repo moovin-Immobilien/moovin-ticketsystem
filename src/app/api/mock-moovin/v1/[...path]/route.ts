@@ -13,7 +13,7 @@ const OPEN_APPT = ["eingeladen", "bestaetigt"];
 function validatePost(res0: string, res2: string | undefined, b: Record<string, any>): string | null {
   if (b.__invalid) return "Body ist kein gültiges JSON";
   if (typeof b.source_ticket_id !== "string" || !b.source_ticket_id) return "source_ticket_id fehlt";
-  if (res0 === "applications" && res2 === "documents") {
+  if (res0 === "applicants" && res2 === "documents") {
     if (!Array.isArray(b.files) || b.files.length > 20) return "files: Array mit höchstens 20 Dateien erwartet";
     for (const f of b.files) {
       if (!f?.filename || !f?.content_type || typeof f?.content_base64 !== "string") return "Datei braucht filename, content_type, content_base64";
@@ -121,12 +121,13 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ path: string[] 
       try { b = body ? JSON.parse(body) : {}; } catch { b = { __invalid: true }; }
       const invalid = validatePost(res0, res2, b);
       if (invalid) result = { status: 400, data: { error: invalid } };
-      else if (res0 === "applications" && res1 && res2 === "documents") {
-        if (!(await owns("applications", res1))) result = { status: 404, data: { error: "unbekannt" } };
+      else if (res0 === "applicants" && res1 && res2 === "documents") {
+        // Dokumente gehören zum Bewerber (Profil); nur der eigene Bewerber, sonst 404
+        if (!applicant || applicant.id !== res1) result = { status: 404, data: { error: "unbekannt" } };
         else {
           for (const f of b.files ?? []) {
             const size = Math.floor(((f.content_base64 ?? "").length * 3) / 4);
-            await sql`insert into mock_moovin.documents (application_id, filename, content_type, size_bytes, source_ticket) values (${res1}, ${f.filename}, ${f.content_type}, ${size}, ${b.source_ticket_id})`;
+            await sql`insert into mock_moovin.documents (applicant_id, filename, content_type, size_bytes, source_ticket) values (${res1}, ${f.filename}, ${f.content_type}, ${size}, ${b.source_ticket_id})`;
           }
           result = { status: 201, data: { stored: (b.files ?? []).length, status: "neu_unsortiert" } };
         }
