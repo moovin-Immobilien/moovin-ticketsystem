@@ -192,8 +192,9 @@ async function main() {
     expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { body: { source_ticket_id: "api-check", answer: "zusage" }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
   await check("ungültige answer → 400", async () =>
     expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { body: { source_ticket_id: "api-check", answer: "vielleicht" }, idem: randomUUID() }), [400, 422]));
-  await check("Dokumente an fremde Bewerbung → 404", async () =>
-    expect(await call("POST", `/applications/${enc(OWN_APP)}/documents`, { body: { source_ticket_id: "api-check", files: [] }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
+  const OWN_APPLICANT = String(ctx?.applicant?.id ?? "unbekannt");
+  await check("Dokumente an fremdes Bewerberprofil → 404", async () =>
+    expect(await call("POST", `/applicants/${enc(OWN_APPLICANT)}/documents`, { body: { source_ticket_id: "api-check", files: [] }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
 
   if (WRITE) {
     console.log("\n5 Schreiben (Testdaten werden verändert)");
@@ -205,7 +206,7 @@ async function main() {
       if (!first) return "erster Aufruf fehlt";
       return again.status === first.status && again.raw === first.raw ? true : `HTTP ${again.status} / ${again.raw.slice(0, 80)} ≠ erster Aufruf`;
     });
-    await check("Dokument ablegen → 201", async () => expect(await call("POST", `/applications/${enc(OWN_APP)}/documents`, {
+    await check("Dokument im Bewerberprofil ablegen → 201", async () => expect(await call("POST", `/applicants/${enc(OWN_APPLICANT)}/documents`, {
       idem: randomUUID(),
       body: { source_ticket_id: "api-check", files: [{ filename: "api-check.txt", content_type: "text/plain", content_base64: Buffer.from("Konformitätstest").toString("base64") }] },
     }), [201]));
