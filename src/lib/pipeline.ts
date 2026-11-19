@@ -15,6 +15,7 @@ import type { AgentInput, AgentOutput, ProposedAction } from "./ai/types";
 import { sendMail } from "./mailer";
 import { similarity, UNCHANGED_THRESHOLD } from "./similarity";
 import { INTENTS, type ActionType } from "./intents";
+import { resolveAppointment } from "./appointments";
 
 const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz", "datenschutz_weiterleiten"];
 // Interne Weiterleitung (kein Schreibzugriff auf moovin): auch bei unbekanntem oder nicht verifiziertem Absender erlaubt.
@@ -107,20 +108,9 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
   let moovinError: string | null = null;
   try { ctx = await client.getApplicantContext(); } catch (e) { moovinError = (e as Error).message; }
 
-  const allowedObjects = new Set((ctx?.applications ?? []).map((a) => a.object_id));
-  let assignee: string | null = null;
-  let objectTitle: string | null = ctx?.applications[0]?.object_title ?? null;
-  const objectId: string | null = ctx?.applications[0]?.object_id ?? null;
-  if (objectId) {
-    try {
-      const o = await client.getObject(objectId);
-      if (o?.account_manager?.email) {
-        const ag = await sql`select email from ticket.agents where email = ${o.account_manager.email.toLowerCase()} and active`;
-        assignee = ag[0]?.email ?? null;
-      }
-      objectTitle = o?.title ?? objectTitle;
-    } catch { /* AM bleibt leer → Pool */ }
-  }
+  const allowedListings = new Set((ctx?.applications ?? []).map((a) => a.listing_id));
+  const objectTitle: string | null = ctx?.applications[0]?.object_title ?? null;
+  const listingId: string | null = ctx?.applications[0]?.listing_id ?? null;
 
   const input: AgentInput = {
     ticketId,
@@ -134,8 +124,8 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
     context: ctx,
     tools: {
       getApplicationStatus: async () => ctx,
-      getObjectInfo: async (id) => (allowedObjects.has(id) ? client.getObject(id) : null),
-      searchKnowledge: async (q) => (await searchKnowledge(q, [...allowedObjects])).map((h) => ({ title: h.title, body: h.body, scope: h.scope === "global" ? "allgemein" : `Objekt ${h.object_id}` })),
+      getObjectInfo: async (id) => (allowedListings.has(id) ? client.getListing(id) : null),
+      searchKnowledge: async (q) => (await searchKnowledge(q, [...allowedListings])).map((h) => ({ title: h.title, body: h.body, scope: h.scope === "global" ? "allgemein" : `Objekt ${h.object_id}` })),
     },
   };
 
@@ -157,7 +147,8 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
 
   // Aktionen serverseitig prüfen: nur IDs aus dem Kontext dieses Absenders, keine Duplikate.
   const appIds = new Set((ctx?.applications ?? []).map((a) => a.id));
-  const apptIds = new Set((ctx?.applications ?? []).map((a) => a.appointment?.id).filter(Boolean) as string[]);
+  // Termin-Zuordnung entscheidet der Server (Referenz im Betreff, einziger offener Termin, eindeutig erwähnt) – nicht die KI
+  const apptResolution = resolveAppointment(ctx, lastIn.subject ?? "", lastIn.body_text ?? "");
   const seen = new Set<string>();
   const valid: ProposedAction[] = [];
   for (const a of r.actions ?? []) {
@@ -167,7 +158,16 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
       continue;
     }
     if (!ctx) continue;
-    if (["termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch"].includes(a.type) && !apptIds.has(a.appointment_id)) continue;
+    if (["termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch"].includes(a.type)) {
+      if (apptResolution.id === null) {
+        r.needs_human = true;
+        r.needs_human_reason = [r.needs_human_reason, apptResolution.reason].filter(Boolean).join("; ");
+        r.confidence = Math.min(r.confidence, 0.5);
+        continue;
+      }
+      a.appointment_id = apptResolution.id;
+      a.application_id = ctx.applications.find((x) => x.appointment?.id === apptResolution.id)?.id ?? "";
+    }
     if (["dokumente_ablegen", "interesse_setzen", "notiz"].includes(a.type) && !appIds.has(a.application_id)) continue;
     if (a.type === "dokumente_ablegen" && !atts.length) continue;
     if (a.type === "interesse_setzen" && !["interessiert", "zurueckgezogen"].includes(a.interest)) continue;
@@ -197,6 +197,11 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
   // Objekt/Bewerbung für Anzeige: aus Aktion, sonst erste Bewerbung
   const focusApp = ctx?.applications.find((a) => valid.some((v) => v.application_id === a.id || v.appointment_id === a.appointment?.id)) ?? ctx?.applications[0];
 
+  // Zuständiger AM kommt direkt aus der Bewerbung (kein eigener API-Aufruf)
+  let assignee: string | null = null;
+  const amEmail = focusApp?.account_manager_email?.toLowerCase();
+  if (amEmail) assignee = (await sql`select email from ticket.agents where email = ${amEmail} and active`)[0]?.email ?? null;
+
   const [setting] = await sql`select * from ticket.intent_settings where intent = ${r.intent}`;
   const auto =
     !!setting && setting.mode === "auto" && !setting.locked &&
@@ -206,8 +211,8 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
   await sql`update ticket.tickets set
       intent = ${r.intent}, language = ${r.language}, confidence = ${r.confidence}, summary = ${r.summary},
       needs_human = ${r.needs_human}, needs_human_reason = ${r.needs_human_reason || null},
-      applicant_id = ${ctx?.applicant.id ?? null}, applicant_known = ${!!ctx}, reply_to_email = ${ctx?.applicant.email?.toLowerCase() ?? null},
-      application_id = ${focusApp?.id ?? null}, object_id = ${focusApp?.object_id ?? objectId}, object_title = ${focusApp?.object_title ?? objectTitle},
+      applicant_id = ${ctx?.applicant.id ?? null}, applicant_known = ${!!ctx}, reply_to_email = ${ctx ? ticket.sender_email : null},
+      application_id = ${focusApp?.id ?? null}, object_id = ${focusApp?.listing_id ?? listingId}, object_title = ${focusApp?.object_title ?? objectTitle},
       assignee_email = coalesce(assignee_email, ${assignee}),
       status = 'entwurf', updated_at = now()
     where id = ${ticketId}`;
@@ -228,7 +233,7 @@ function actionLabel(a: ProposedAction, ctx: ApplicantContext | null): string {
     case "termin_bestaetigen": return `Teilnahme am Termin ${when} bestätigen`;
     case "termin_absagen": return `Termin ${when} absagen und Slot freigeben`;
     case "termin_verschieben_wunsch": return `Verschiebe-Wunsch für Termin ${when} an AM: „${a.text.slice(0, 120)}“`;
-    case "interesse_setzen": return a.interest === "zurueckgezogen" ? `Bewerbung ${a.application_id} zurückziehen` : `Interesse für ${a.application_id} bestätigen`;
+    case "interesse_setzen": return a.interest === "zurueckgezogen" ? `Rückzug als Notiz an Bewerbung ${a.application_id} (${app?.object_title ?? ""}) – AM zieht in moovin zurück` : `Interesse als Notiz an Bewerbung ${a.application_id} vermerken`;
     case "notiz": return `Notiz: „${a.text.slice(0, 140)}“`;
     case "datenschutz_weiterleiten": return `An ${env.datenschutzAddress()} weiterleiten${a.text ? `: „${a.text.slice(0, 120)}“` : ""}`;
   }
@@ -305,16 +310,21 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
         break;
       }
       case "termin_bestaetigen":
-        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/confirm`, { source_ticket_id: src }, a.idempotency_key);
+        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/reply`, { source_ticket_id: src, answer: "zusage" }, a.idempotency_key);
         break;
       case "termin_absagen":
-        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/cancel`, { source_ticket_id: src, comment: "Absage per Mail" }, a.idempotency_key);
+        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/reply`, { source_ticket_id: src, answer: "absage", comment: "Absage per Mail" }, a.idempotency_key);
         break;
       case "termin_verschieben_wunsch":
-        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/reschedule-request`, { source_ticket_id: src, wish: p.text || "Verschiebung gewünscht" }, a.idempotency_key);
+        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/reply`, { source_ticket_id: src, answer: "verschieben", comment: String(p.text || "Verschiebung gewünscht").slice(0, 500) }, a.idempotency_key);
         break;
       case "interesse_setzen":
-        result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/interest`, { source_ticket_id: src, interest: p.interest }, a.idempotency_key);
+        // Kein eigener Endpunkt: als Notiz an die Bewerbung, der AM setzt den Status in moovin
+        result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/notes`, {
+          source_ticket_id: src,
+          text: p.interest === "zurueckgezogen" ? `Bewerber zieht die Bewerbung per Mail zurück. ${p.text ?? ""}`.trim() : `Bewerber bestätigt per Mail sein Interesse. ${p.text ?? ""}`.trim(),
+          ticket_url: `${env.appUrl()}/tickets/${a.ticket_id}`,
+        }, a.idempotency_key);
         break;
       case "datenschutz_weiterleiten": {
         const [m] = await sql`select m.from_email, m.from_name, m.subject, m.body_text, m.created_at, m.sender_verified
