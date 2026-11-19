@@ -6,10 +6,9 @@ info:
     Schmale, zweckgebundene Schnittstelle zwischen app.moovin.de und dem moovin Ticketsystem.
     Umsetzung auf moovin-Seite: IT (Guido). Im Prototyp existiert eine Attrappe unter /api/mock-moovin/v1.
 
-    ## Umfang in zwei Stufen
-    - Stufe 1 (lesen): `GET /applicants` (Pflicht), `GET /listings/{id}` (optional).
-      Damit beantwortet das Ticketsystem Fragen zu Status, Termin und fehlenden Unterlagen. Aktionen klickt der AM in moovin.
-    - Stufe 2 (schreiben): `POST /appointments/{id}/reply`, `POST /applications/{id}/documents`, `POST /applications/{id}/notes`.
+    ## Umfang: fünf Aufrufe
+    - Lesen: `GET /applicants`, `GET /listings/{id}`.
+    - Schreiben: `POST /appointments/{id}/reply`, `POST /applications/{id}/documents`, `POST /applications/{id}/notes`.
 
     ## Sicherheit
     - Nur Server-zu-Server. Jede Anfrage ist HMAC-SHA256-signiert:
@@ -127,7 +126,7 @@ components:
 paths:
   /applicants:
     get:
-      summary: "Stufe 1 · Bewerber und aktuelle Bewerbungen zur Absender-Mailadresse"
+      summary: "Bewerber und aktuelle Bewerbungen zur Absender-Mailadresse"
       parameters:
         - $ref: "#/components/parameters/SubjectEmail"
         - name: email
@@ -140,7 +139,7 @@ paths:
         "404": { description: Adresse unbekannt }
   /listings/{listingId}:
     get:
-      summary: "Stufe 1, optional · Öffentliche Inseratsdaten (nur Inserate, auf die sich der Absender beworben hat)"
+      summary: "Öffentliche Inseratsdaten (nur Inserate, auf die sich der Absender beworben hat)"
       parameters:
         - $ref: "#/components/parameters/SubjectEmail"
         - { name: listingId, in: path, required: true, schema: { type: string } }
@@ -149,7 +148,7 @@ paths:
         "404": { description: Unbekannt oder nicht zum Absender gehörig }
   /appointments/{appointmentId}/reply:
     post:
-      summary: "Stufe 2 · Antwort des Bewerbers auf eine Einladung: zusagen, absagen oder Verschiebewunsch"
+      summary: "Antwort des Bewerbers auf eine Einladung: zusagen, absagen oder Verschiebewunsch"
       description: |
         zusage → Status bestaetigt (bereits bestätigt → 200). absage → Status abgesagt, Platz wird frei.
         verschieben → Termin bleibt, der Wunsch (comment) landet beim AM als Aufgabe/Notiz.
@@ -176,7 +175,7 @@ paths:
         "409": { description: Termin nicht mehr offen }
   /applications/{applicationId}/documents:
     post:
-      summary: "Stufe 2 · Mail-Anhänge an der Bewerbung ablegen (Status „neu, ungeprüft“; geprüft wird wie bisher in moovin)"
+      summary: "Mail-Anhänge an der Bewerbung ablegen (Status „neu, ungeprüft“; geprüft wird wie bisher in moovin)"
       parameters:
         - $ref: "#/components/parameters/SubjectEmail"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -206,7 +205,7 @@ paths:
         "404": { description: Unbekannt oder nicht zum Absender gehörig }
   /applications/{applicationId}/notes:
     post:
-      summary: "Stufe 2 · Notiz an der Bewerbung für den AM (z. B. Rückzug, Interesse, Hinweise aus der Mail)"
+      summary: "Notiz an der Bewerbung für den AM (z. B. Rückzug, Interesse, Hinweise aus der Mail)"
       parameters:
         - $ref: "#/components/parameters/SubjectEmail"
         - $ref: "#/components/parameters/IdempotencyKey"
