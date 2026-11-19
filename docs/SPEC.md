@@ -122,7 +122,7 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 ## 6. Phasen
 1. Konzept + Prototyp mit Attrappe der moovin-API (dieses Repo)
 2. Test mit echten Mails aus Zoho-Desk-Export (Replay), Prompt-Feinschliff, Messung
-3. Guido: echte moovin-API nach `docs/moovin-api.openapi.yaml` – Stufe 1 (lesen) zuerst, Stufe 2 (schreiben) nach dem Schattenbetrieb; Security-Review
+3. Guido: echte moovin-API nach `docs/moovin-api.openapi.yaml` (alle fünf Aufrufe in einem Schritt), Security-Review
 4. Pilot mit 1–2 AMs, danach Umstellung mieter@ und Abschaltung Zoho Desk
 
 ## 7. Offene Punkte
