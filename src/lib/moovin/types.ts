@@ -1,52 +1,52 @@
-// Typen gemäß docs/moovin-api.openapi.yaml
+// Typen gemäß docs/moovin-api.openapi.yaml (Datensparsam: nur was für die Antwort auf eine Mail nötig ist)
+
+export type ApplicationStatus =
+  | "eingegangen" | "unvollstaendig" | "in_pruefung" | "eingeladen" | "besichtigt"
+  | "beim_eigentuemer" | "zusage" | "absage" | "zurueckgezogen";
+
 export type Appointment = {
-  id: string;
-  starts_at: string;
+  id: string; // steht auch im Betreff der Einladungs-/Erinnerungsmail: „[Termin <id>]“
+  starts_at: string; // ISO 8601 mit Zeitzone
   ends_at?: string | null;
-  kind?: "sammelbesichtigung" | "einzelbesichtigung" | "uebergabe";
   status: "eingeladen" | "bestaetigt" | "abgesagt" | "stattgefunden" | "no_show";
   meeting_point?: string | null;
 };
 
 export type Application = {
   id: string;
-  object_id: string;
-  object_title?: string;
-  status: string;
-  status_label: string;
-  missing_documents: string[];
+  listing_id: string; // Inserats-Kennung, z. B. MV-ABC123
+  object_title: string; // wie im Inserat, z. B. „2-Zimmer, Lindenallee 12, Hamburg“
+  status: ApplicationStatus;
+  missing_documents: string[]; // nur Dokumentarten, keine Inhalte
+  account_manager_email?: string | null;
+  appointment?: Appointment | null; // nächster bzw. letzter Termin dieser Bewerbung
+  // vom Ticketsystem ergänzt (nicht Teil der API):
+  status_label?: string;
   next_step?: string;
-  appointment?: Appointment | null;
-  created_at?: string;
 };
 
 export type Applicant = {
   id: string;
-  email: string;
-  salutation?: string;
-  first_name: string;
+  salutation?: string | null; // „Frau“, „Herr“ oder leer – nur für die Anrede
   last_name: string;
-  preferred_language?: string;
+  language?: string | null; // de, en …
 };
 
 export type ApplicantContext = { applicant: Applicant; applications: Application[] };
 
-export type ObjectInfo = {
+/** Öffentliche Inseratsdaten – nichts, was nicht ohnehin im Inserat steht. */
+export type Listing = {
   id: string;
   title: string;
   address: string;
-  district?: string;
-  city?: string;
-  rooms?: number;
-  size_sqm?: number;
-  rent_cold_eur?: number;
-  rent_warm_eur?: number;
-  available_from?: string;
-  pets?: string;
-  parking?: string;
-  wbs_required?: boolean;
-  viewing_info?: string;
-  application_info?: string;
-  listing_url?: string;
-  account_manager?: { name: string; email: string };
+  rooms?: number | null;
+  size_sqm?: number | null;
+  rent_cold_eur?: number | null;
+  rent_warm_eur?: number | null;
+  available_from?: string | null;
+  pets?: string | null;
+  parking?: string | null;
+  wbs_required?: boolean | null;
+  viewing_info?: string | null;
+  listing_url?: string | null;
 };

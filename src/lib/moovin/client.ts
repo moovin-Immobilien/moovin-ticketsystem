@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { env } from "../env";
 import { signRequest } from "../hmac";
 import { audit } from "../audit";
-import type { ApplicantContext, ObjectInfo } from "./types";
+import type { ApplicantContext, Listing } from "./types";
+import { STATUS_TEXT } from "./status";
 
 /**
  * Einziger Weg des Ticketsystems zu moovin. Jeder Aufruf ist
@@ -50,13 +51,20 @@ export class MoovinClient {
     const r = await this.call<ApplicantContext>("GET", `/applicants?email=${encodeURIComponent(this.subjectEmail)}`);
     if (r.status === 404) return null;
     if (r.status !== 200 || !r.data) throw new Error(`moovin /applicants: HTTP ${r.status}`);
+    // Statustexte ergänzt das Ticketsystem selbst
+    for (const a of r.data.applications ?? []) {
+      const t = STATUS_TEXT[a.status];
+      a.status_label = t?.label ?? a.status;
+      a.next_step = t?.next ?? "";
+      a.missing_documents = a.missing_documents ?? [];
+    }
     return r.data;
   }
 
-  async getObject(objectId: string): Promise<ObjectInfo | null> {
-    const r = await this.call<ObjectInfo>("GET", `/objects/${encodeURIComponent(objectId)}`);
+  async getListing(listingId: string): Promise<Listing | null> {
+    const r = await this.call<Listing>("GET", `/listings/${encodeURIComponent(listingId)}`);
     if (r.status === 404) return null;
-    if (r.status !== 200 || !r.data) throw new Error(`moovin /objects: HTTP ${r.status}`);
+    if (r.status !== 200 || !r.data) throw new Error(`moovin /listings: HTTP ${r.status}`);
     return r.data;
   }
 

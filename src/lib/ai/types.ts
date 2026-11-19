@@ -1,5 +1,5 @@
 import type { ActionType, Intent } from "../intents";
-import type { ApplicantContext, ObjectInfo } from "../moovin/types";
+import type { ApplicantContext, Listing } from "../moovin/types";
 
 export type ProposedAction = {
   type: ActionType;
@@ -32,7 +32,7 @@ export type AgentInput = {
   context: ApplicantContext | null; // nur für Demo-Modus/Validierung; Claude bekommt Daten ausschließlich über Werkzeuge
   tools: {
     getApplicationStatus: () => Promise<ApplicantContext | null>;
-    getObjectInfo: (objectId: string) => Promise<ObjectInfo | null>;
+    getObjectInfo: (listingId: string) => Promise<Listing | null>;
     searchKnowledge: (query: string) => Promise<{ title: string; body: string; scope: string }[]>;
   };
 };
