@@ -4,16 +4,16 @@
 // Nutzung (Werte für eine Staging-Umgebung mit Testdaten):
 //   API_URL=https://staging.app.moovin.de/api/ticket/v1 \
 //   KEY_ID=proto-1 SECRET=... \
-//   OWN_EMAIL=test.bewerber@example.org OWN_APPLICATION_ID=... OWN_APPOINTMENT_ID=... OWN_OBJECT_ID=... \
+//   OWN_EMAIL=test.bewerber@example.org OWN_APPLICATION_ID=... OWN_APPOINTMENT_ID=... OWN_LISTING_ID=... \
 //   FOREIGN_EMAIL=anderer.bewerber@example.org \
 //   [PAST_APPOINTMENT_ID=...] \
 //   npx tsx scripts/api-check.ts [--write] [--destructive]
 //
 //   ohne Flag      nur lesende Aufrufe + Sicherheitsprüfungen (ändert nichts)
-//   --write        zusätzlich Notiz, Dokument, Verschiebewunsch, Interesse, Terminbestätigung (Testdaten!)
+//   --write        zusätzlich Notiz, Dokument, Verschiebewunsch, Terminzusage (Testdaten!)
 //   --destructive  zusätzlich Terminabsage von OWN_APPOINTMENT_ID (Slot wird frei)
 //
-// FOREIGN_EMAIL muss ein anderer Bewerber sein, der sich NICHT auf OWN_OBJECT_ID beworben hat.
+// FOREIGN_EMAIL muss ein anderer Bewerber sein, der sich NICHT auf OWN_LISTING_ID beworben hat.
 // Exit-Code 0 = alles bestanden, 1 = mindestens ein Fehler.
 
 import { randomUUID } from "node:crypto";
@@ -34,7 +34,7 @@ const SECRET = need("SECRET");
 const OWN_EMAIL = need("OWN_EMAIL");
 const OWN_APP = need("OWN_APPLICATION_ID");
 const OWN_APPT = need("OWN_APPOINTMENT_ID");
-const OWN_OBJ = need("OWN_OBJECT_ID");
+const OWN_LISTING = need("OWN_LISTING_ID");
 const FOREIGN_EMAIL = need("FOREIGN_EMAIL");
 const PAST_APPT = process.env.PAST_APPOINTMENT_ID;
 // Optional ein zusätzlicher Header, z. B. für geschützte Staging-Umgebungen: EXTRA_HEADER="Name: Wert"
@@ -83,7 +83,16 @@ const enc = encodeURIComponent;
 
 const APP_STATUS = ["eingegangen", "unvollstaendig", "in_pruefung", "eingeladen", "besichtigt", "beim_eigentuemer", "zusage", "absage", "zurueckgezogen"];
 const APPT_STATUS = ["eingeladen", "bestaetigt", "abgesagt", "stattgefunden", "no_show"];
-const FORBIDDEN_KEYS = /score|ranking|rank|reject|ablehnungsgrund|income|einkommen|gehalt|salary|schufa_score|document_content/i;
+const FORBIDDEN_KEYS = /score|ranking|rank|reject|ablehnungsgrund|income|einkommen|gehalt|salary|schufa|document_content|birth|geburt|phone|telefon|mobile|street_address|wohnadresse|iban|note|notiz|first_name|vorname/i;
+// Erlaubte Felder (Datensparsamkeit): alles andere ist ein Befund
+const ALLOWED = {
+  applicant: ["id", "salutation", "last_name", "language"],
+  application: ["id", "listing_id", "object_title", "status", "missing_documents", "account_manager_email", "appointment"],
+  appointment: ["id", "starts_at", "ends_at", "status", "meeting_point"],
+};
+function extraKeys(o: Record<string, unknown> | null | undefined, allowed: string[], where: string): string[] {
+  return o ? Object.keys(o).filter((k) => !allowed.includes(k)).map((k) => `${where}.${k}`) : [];
+}
 
 function forbiddenKeys(obj: unknown, path = ""): string[] {
   if (!obj || typeof obj !== "object") return [];
@@ -124,17 +133,15 @@ async function main() {
     if (r.status !== 200) return `HTTP ${r.status} ${r.raw.slice(0, 160)}`;
     ctx = r.data;
     const a = ctx?.applicant;
-    if (!a?.id || !a?.email || a.first_name === undefined || a.last_name === undefined) return "applicant.id/email/first_name/last_name fehlen";
-    if (String(a.email).toLowerCase() !== OWN_EMAIL.toLowerCase()) return `applicant.email ${a.email} ≠ ${OWN_EMAIL}`;
+    if (!a?.id || a.last_name === undefined) return "applicant.id/last_name fehlen";
     if (!Array.isArray(ctx.applications)) return "applications ist kein Array";
     return true;
   });
-  await check("Bewerbungen: status aus Enum, status_label gesetzt, OWN_APPLICATION_ID enthalten", async () => {
+  await check("Bewerbungen: status aus Enum, listing_id gesetzt, OWN_APPLICATION_ID enthalten", async () => {
     if (!ctx) return "kein Kontext";
     for (const ap of ctx.applications) {
-      if (!ap.id || !ap.object_id) return `Bewerbung ohne id/object_id`;
+      if (!ap.id || !ap.listing_id || !ap.object_title) return `Bewerbung ohne id/listing_id/object_title`;
       if (!APP_STATUS.includes(ap.status)) return `unbekannter status „${ap.status}“ bei ${ap.id}`;
-      if (!ap.status_label) return `status_label fehlt bei ${ap.id}`;
       if (ap.missing_documents !== undefined && !Array.isArray(ap.missing_documents)) return `missing_documents kein Array bei ${ap.id}`;
       if (ap.appointment) {
         if (!ap.appointment.id || !ap.appointment.starts_at) return `appointment ohne id/starts_at bei ${ap.id}`;
@@ -145,9 +152,16 @@ async function main() {
     if (!ctx.applications.some((ap: any) => ap.id === OWN_APP)) return `OWN_APPLICATION_ID ${OWN_APP} nicht in der Antwort`;
     return true;
   });
-  await check("keine Scores, Rankings, Ablehnungsgründe, Einkommensdaten", async () => {
+  await check("Datensparsam: nur vereinbarte Felder, keine Scores/Einkommen/Kontaktdaten", async () => {
+    if (!ctx) return "kein Kontext";
+    const extra = [
+      ...extraKeys(ctx, ["applicant", "applications"], "root"),
+      ...extraKeys(ctx.applicant, ALLOWED.applicant, "applicant"),
+      ...ctx.applications.flatMap((ap: any) => [...extraKeys(ap, ALLOWED.application, `application ${ap.id}`), ...extraKeys(ap.appointment, ALLOWED.appointment, `appointment ${ap.appointment?.id}`)]),
+    ];
     const bad = forbiddenKeys(ctx);
-    return bad.length ? `verbotene Felder: ${bad.join(", ")}` : true;
+    if (bad.length) return `verbotene Felder: ${bad.join(", ")}`;
+    return extra.length ? `nicht vereinbarte Felder: ${extra.join(", ")}` : true;
   });
   await check("unbekannte Mailadresse → 404", async () => {
     const e = `unbekannt-${randomUUID().slice(0, 8)}@example.invalid`;
@@ -156,16 +170,16 @@ async function main() {
   await check("email-Parameter ≠ X-Subject-Email → kein Datenzugriff (400/404)", async () =>
     expect(await call("GET", `/applicants?email=${enc(OWN_EMAIL)}`, { subject: FOREIGN_EMAIL }), [400, 403, 404]));
 
-  console.log("\n3 Lesen: Objekt");
-  await check("GET /objects/{eigenes Objekt} → 200 + Pflichtfelder", async () => {
-    const r = await call("GET", `/objects/${enc(OWN_OBJ)}`);
+  console.log("\n3 Lesen: Inserat (optional)");
+  await check("GET /listings/{eigenes Inserat} → 200 + Pflichtfelder (404 = Endpunkt nicht gebaut)", async () => {
+    const r = await call("GET", `/listings/${enc(OWN_LISTING)}`);
+    if (r.status === 404) return true;
     if (r.status !== 200) return `HTTP ${r.status} ${r.raw.slice(0, 160)}`;
     if (!r.data?.id || !r.data?.title || !r.data?.address) return "id/title/address fehlen";
     const bad = forbiddenKeys(r.data);
     return bad.length ? `verbotene Felder: ${bad.join(", ")}` : true;
   });
-  await check("Objekt eines anderen Bewerbers → 404", async () => expect(await call("GET", `/objects/${enc(OWN_OBJ)}`, { subject: FOREIGN_EMAIL }), [404]));
-  await check("nicht existierendes Objekt → 404", async () => expect(await call("GET", `/objects/gibt-es-nicht-${randomUUID().slice(0, 6)}`), [404]));
+  await check("Inserat eines anderen Bewerbers → 404", async () => expect(await call("GET", `/listings/${enc(OWN_LISTING)}`, { subject: FOREIGN_EMAIL }), [404]));
 
   console.log("\n4 Schreiben: Schutz (ändert nichts)");
   const noteBody = { source_ticket_id: "api-check", text: "Konformitätstest – bitte ignorieren", ticket_url: "https://example.invalid/tickets/0" };
@@ -173,9 +187,11 @@ async function main() {
   await check("Notiz an fremde Bewerbung (fremder Absender) → 404", async () =>
     expect(await call("POST", `/applications/${enc(OWN_APP)}/notes`, { body: noteBody, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
   await check("Termin fremd absagen (fremder Absender) → 404", async () =>
-    expect(await call("POST", `/appointments/${enc(OWN_APPT)}/cancel`, { body: { source_ticket_id: "api-check" }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
-  await check("Termin fremd bestätigen (fremder Absender) → 404", async () =>
-    expect(await call("POST", `/appointments/${enc(OWN_APPT)}/confirm`, { body: { source_ticket_id: "api-check" }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
+    expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { body: { source_ticket_id: "api-check", answer: "absage" }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
+  await check("Termin fremd zusagen (fremder Absender) → 404", async () =>
+    expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { body: { source_ticket_id: "api-check", answer: "zusage" }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
+  await check("ungültige answer → 400", async () =>
+    expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { body: { source_ticket_id: "api-check", answer: "vielleicht" }, idem: randomUUID() }), [400, 422]));
   await check("Dokumente an fremde Bewerbung → 404", async () =>
     expect(await call("POST", `/applications/${enc(OWN_APP)}/documents`, { body: { source_ticket_id: "api-check", files: [] }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
 
@@ -193,18 +209,17 @@ async function main() {
       idem: randomUUID(),
       body: { source_ticket_id: "api-check", files: [{ filename: "api-check.txt", content_type: "text/plain", content_base64: Buffer.from("Konformitätstest").toString("base64") }] },
     }), [201]));
-    await check("Verschiebewunsch → 201", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reschedule-request`, { idem: randomUUID(), body: { source_ticket_id: "api-check", wish: "Test: lieber Samstagvormittag" } }), [201]));
-    await check("Interesse bestätigen → 200", async () => expect(await call("POST", `/applications/${enc(OWN_APP)}/interest`, { idem: randomUUID(), body: { source_ticket_id: "api-check", interest: "interessiert" } }), [200]));
-    await check("ungültiger interest-Wert → 400", async () => expect(await call("POST", `/applications/${enc(OWN_APP)}/interest`, { idem: randomUUID(), body: { source_ticket_id: "api-check", interest: "vielleicht" } }), [400, 422]));
-    await check("Termin bestätigen → 200 (409 falls schon abgesagt/vergangen)", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/confirm`, { idem: randomUUID(), body: { source_ticket_id: "api-check" } }), [200, 409]));
+    await check("Verschiebewunsch → 200", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "verschieben", comment: "Test: lieber Samstagvormittag" } }), [200]));
+    await check("Verschiebewunsch ohne comment → 400", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "verschieben" } }), [400, 422]));
+    await check("Termin zusagen → 200 (409 falls schon abgesagt/vergangen)", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "zusage" } }), [200, 409]));
     if (PAST_APPT) {
-      await check("vergangenen Termin bestätigen → 409", async () => expect(await call("POST", `/appointments/${enc(PAST_APPT)}/confirm`, { idem: randomUUID(), body: { source_ticket_id: "api-check" } }), [409]));
-      await check("vergangenen Termin absagen → 409", async () => expect(await call("POST", `/appointments/${enc(PAST_APPT)}/cancel`, { idem: randomUUID(), body: { source_ticket_id: "api-check" } }), [409]));
+      await check("vergangenen Termin zusagen → 409", async () => expect(await call("POST", `/appointments/${enc(PAST_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "zusage" } }), [409]));
+      await check("vergangenen Termin absagen → 409", async () => expect(await call("POST", `/appointments/${enc(PAST_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "absage" } }), [409]));
     }
     if (DESTRUCTIVE) {
-      await check("Termin absagen → 200", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/cancel`, { idem: randomUUID(), body: { source_ticket_id: "api-check", comment: "Konformitätstest" } }), [200]));
-      await check("schon abgesagten Termin nochmal absagen → 409", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/cancel`, { idem: randomUUID(), body: { source_ticket_id: "api-check" } }), [409]));
-      await check("abgesagten Termin bestätigen → 409", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/confirm`, { idem: randomUUID(), body: { source_ticket_id: "api-check" } }), [409]));
+      await check("Termin absagen → 200", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "absage", comment: "Konformitätstest" } }), [200]));
+      await check("schon abgesagten Termin nochmal absagen → 409", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "absage" } }), [409]));
+      await check("abgesagten Termin zusagen → 409", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "zusage" } }), [409]));
     }
   } else {
     console.log("\n(Schreibende Aufrufe übersprungen – mit --write bzw. --destructive ausführen)");
