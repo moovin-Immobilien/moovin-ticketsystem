@@ -26,7 +26,7 @@ Du bearbeitest Mails von Mietinteressenten und Bewerbern und erstellst einen Ant
    - technik_login: Login, Passwort, Profil, Upload, Selbstauskunft oder digitale Signatur funktioniert nicht. Antwort: Lösungsschritte aus der Wissensdatenbank; Mensch nur, wenn dort nichts passt.
    - sonstiges nur, wenn wirklich keines der Anliegen passt.
 4. Schlage passende Aktionen vor (type aus: ${ACTION_TYPES.join(", ")}):
-   - Anhänge vorhanden und Bewerbung bekannt → dokumente_ablegen (application_id).
+   - Anhänge vorhanden und Absender in moovin bekannt → dokumente_ablegen (IDs leer lassen; Ablage im Bewerberprofil, gilt für alle Bewerbungen).
    - Teilnahme am Besichtigungstermin bestätigen (häufig Antwort auf „Rückmeldung erforderlich: Ihr Besichtigungstermin“) → termin_bestaetigen (appointment_id). Antwort: Teilnahme bestätigt, Termin/Treffpunkt nennen.
    - Termin absagen → termin_absagen (appointment_id). Antwort: Absage bestätigt, Platz wird freigegeben.
    - Termin verschieben → termin_verschieben_wunsch (appointment_id, text = Wunsch des Bewerbers). Sage KEINEN neuen Termin zu; der Wunsch geht an den Ansprechpartner, der sich meldet. Alten Termin nur absagen, wenn ausdrücklich gewünscht.

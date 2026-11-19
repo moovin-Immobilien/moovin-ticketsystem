@@ -52,9 +52,9 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
       if (app?.missing_documents.length) body += `\n\nFolgende Unterlagen fehlen noch:\n- ${app.missing_documents.join("\n- ")}\n\nSie können diese einfach als Antwort auf diese Mail senden.`;
       conf = 0.9; break;
     case "unterlagen_nachreichen":
-      body = `vielen Dank, wir haben Ihre Unterlagen erhalten (${i.attachments.map((x) => x.filename).join(", ") || "ohne Anhang"}) und Ihrer Bewerbung zugeordnet. Wir prüfen sie in der Regel innerhalb von 1–2 Werktagen.`;
+      body = `vielen Dank, wir haben Ihre Unterlagen erhalten (${i.attachments.map((x) => x.filename).join(", ") || "ohne Anhang"}) und in Ihrem Bewerberprofil abgelegt. Wir prüfen sie in der Regel innerhalb von 1–2 Werktagen.`;
       if (!i.attachments.length) { needs = true; reason = "Unterlagen angekündigt, aber keine Anhänge gefunden"; conf = 0.5; }
-      if (app && i.attachments.length) act({ type: "dokumente_ablegen", application_id: app.id });
+      if (ctx && i.attachments.length) act({ type: "dokumente_ablegen" });
       conf = Math.min(conf, 0.88); break;
     case "termin_absage":
       if (appt) { body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihren Besichtigungstermin am ${fmt(appt.starts_at)} storniert und den Platz freigegeben.`; act({ type: "termin_absagen", appointment_id: appt.id }); conf = 0.9; }
