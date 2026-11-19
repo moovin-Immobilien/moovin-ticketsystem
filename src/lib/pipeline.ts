@@ -16,6 +16,7 @@ import { sendMail } from "./mailer";
 import { similarity, UNCHANGED_THRESHOLD } from "./similarity";
 import { INTENTS, type ActionType } from "./intents";
 import { resolveAppointment } from "./appointments";
+import { copyCorrespondence } from "./correspondence";
 
 const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz", "datenschutz_weiterleiten"];
 // Interne Weiterleitung (kein Schreibzugriff auf moovin): auch bei unbekanntem oder nicht verifiziertem Absender erlaubt.
@@ -285,7 +286,9 @@ export async function sendDraft(opts: { ticketId: number; draftId: number; actor
 
   await sql`update ticket.tickets set status = 'beantwortet', auto_handled = ${actor === "ki"},
             first_response_at = coalesce(first_response_at, now()), updated_at = now() where id = ${ticketId}`;
-  await audit(actor, "ticket", { event: "beantwortet", draftId, delivery, similarity: sim, actions: results }, ticketId);
+  // Option: Kopie von Mail und Antwort im Bewerber in moovin (blockiert den Versand nie)
+  const copy = await copyCorrespondence(ticketId);
+  await audit(actor, "ticket", { event: "beantwortet", draftId, delivery, similarity: sim, actions: results, copy }, ticketId);
   return { delivery, results };
 }
 
