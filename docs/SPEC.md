@@ -1,6 +1,6 @@
 # moovin Ticketsystem – Anforderungen (SPEC)
 
-Stand: 18.11.2026 · Owner: Fabian Mellin · Umsetzung Prototyp: Fabian + Claude · Anbindung moovin: Guido (IT)
+Stand: 19.11.2026 · Owner: Fabian Mellin · Umsetzung Prototyp: Fabian + Claude · Anbindung moovin: Guido (IT)
 
 ## 1. Ziel
 
@@ -40,7 +40,7 @@ Ticketsystem bearbeitet. Claude beantwortet Anliegen auf Basis einer Wissensdate
 | Zuteilung | AM des Objekts; Vertretung durch Team, sobald überfällig |
 | SLA | Menschlich bearbeitete Tickets: Antwort am gleichen Werktag |
 | Stack | Next.js auf Vercel, Postgres (Supabase, Region Frankfurt), Claude API |
-| API-Auth | HMAC-signierte Requests mit Zeitstempel + IP-Allowlist, Schlüssel rotierbar, jeder Aufruf geloggt |
+| API-Auth | HMAC-signierte Requests mit Zeitstempel, Schlüssel rotierbar, jeder Aufruf geloggt; keine IP-Allowlist (feste Ausgangs-IPs kosten bei Vercel extra) |
 | Termin verschieben | V1: System bucht nicht selbst um, sondern übermittelt den Verschiebe-Wunsch (+ Absage des alten Slots nur wenn explizit gewünscht) |
 
 ## 4. Funktionen
@@ -57,7 +57,7 @@ Ticketsystem bearbeitet. Claude beantwortet Anliegen auf Basis einer Wissensdate
 - Claude bekommt: Mailtext (ohne Anhänge, nur Dateinamen/Typ), bisherigen Verlauf, und **Werkzeuge**, die serverseitig an
   den identifizierten Bewerber gebunden sind (Claude kann keine fremde Mailadresse abfragen):
   - `get_application_status` – Bewerbungen, Status, fehlende Unterlagen, Termine dieses Absenders
-  - `get_object_info` – Objektinfos (nur Objekte, auf die sich der Absender beworben hat)
+  - `get_object_info` – öffentliche Inseratsdaten (nur Inserate, auf die sich der Absender beworben hat)
   - `search_knowledge` – Wissensdatenbank (FAQ + Objekt-Ergänzungen)
 - Ergebnis: Intent, Sprache, Konfidenz, Zusammenfassung, Antwortentwurf, vorgeschlagene Aktionen, `needs_human` + Grund.
 - Ohne API-Key läuft ein **Demo-Modus** (regelbasiert), damit die Oberfläche testbar bleibt.
@@ -76,11 +76,12 @@ Sonst: Entwurf → Freigabe-Queue des zuständigen AM.
 ### 4.5 Aktionen in moovin
 Ausgeführt bei Freigabe durch AM (oder im Auto-Modus). Jede Aktion ist idempotent (`Idempotency-Key` = Ticket-ID + Aktion).
 - Dokumente ablegen → `POST /applications/{id}/documents` (Anhänge base64, ungelesen)
-- Teilnahme bestätigen → `POST /appointments/{id}/confirm`
-- Termin absagen → `POST /appointments/{id}/cancel`
-- Verschiebe-Wunsch → `POST /appointments/{id}/reschedule-request`
-- Interesse setzen → `POST /applications/{id}/interest` (`interessiert` | `zurueckgezogen`)
-- Notiz → `POST /applications/{id}/notes`
+- Termin zusagen / absagen / Verschiebewunsch → `POST /appointments/{id}/reply` (`answer` = `zusage` | `absage` | `verschieben`)
+- Rückzug, Interesse, sonstige Hinweise → `POST /applications/{id}/notes` (AM setzt den Status in moovin)
+
+Welcher Termin gemeint ist, entscheidet der Server (`src/lib/appointments.ts`): Referenz `[Termin <id>]` im Betreff
+(steht in jeder Einladungs-/Erinnerungsmail), sonst einziger offener Termin, sonst eindeutig erwähntes Datum/Adresse/Inserat.
+Nicht eindeutig → keine Terminaktion, Rückfrage an den Bewerber.
 
 ### 4.6 Oberfläche (AM)
 - **Tickets:** Filter Meine / Pool / Überfällig / Alle; Status, Anliegen, Absender, Objekt, Eingang, Fälligkeit.
@@ -121,11 +122,11 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 ## 6. Phasen
 1. Konzept + Prototyp mit Attrappe der moovin-API (dieses Repo)
 2. Test mit echten Mails aus Zoho-Desk-Export (Replay), Prompt-Feinschliff, Messung
-3. Guido: echte moovin-API nach `docs/moovin-api.openapi.yaml`, Security-Review
+3. Guido: echte moovin-API nach `docs/moovin-api.openapi.yaml` – Stufe 1 (lesen) zuerst, Stufe 2 (schreiben) nach dem Schattenbetrieb; Security-Review
 4. Pilot mit 1–2 AMs, danach Umstellung mieter@ und Abschaltung Zoho Desk
 
 ## 7. Offene Punkte
 - Inbound-Mail-Anbieter final wählen (Vorschlag Postmark, EU-Alternative prüfen) – **kostenpflichtig**.
 - SSO (Google Workspace oder M365?) statt Prototyp-Login.
-- Statische Ausgangs-IPs für die IP-Allowlist kosten bei Vercel extra → Alternative: nur HMAC + mTLS oder Proxy.
+- moovin: Termin-Referenz `[Termin <id>]` in den Betreff der Einladungs- und Erinnerungsmails (Zuordnung bei mehreren Bewerbungen).
 - Aufbewahrungsfrist mit Datenschutz abstimmen.

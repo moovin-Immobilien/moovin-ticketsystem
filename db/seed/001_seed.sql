@@ -101,3 +101,12 @@ insert into mock_moovin.appointments (id, application_id, starts_at, ends_at, ki
 ('AT-9002', 'AP-5002', ((current_date - 3) + time '18:00') at time zone 'Europe/Berlin', null, 'sammelbesichtigung', 'stattgefunden', 'Foyer Haus B, Stralauer Allee 40, Berlin'),
 ('AT-9003', 'AP-5003', ((current_date + 1) + time '18:00') at time zone 'Europe/Berlin', ((current_date + 1) + time '18:30') at time zone 'Europe/Berlin', 'sammelbesichtigung', 'bestaetigt', 'Foyer Haus B, Stralauer Allee 40, Berlin'),
 ('AT-9006', 'AP-5006', ((current_date + 3) + time '18:00') at time zone 'Europe/Berlin', ((current_date + 3) + time '18:30') at time zone 'Europe/Berlin', 'sammelbesichtigung', 'eingeladen', 'Foyer Haus B, Stralauer Allee 40, Berlin');
+
+-- Bewerberin mit zwei offenen Einladungen (Test: welcher Termin ist gemeint?)
+insert into mock_moovin.applicants values ('A-1007', 'nina.vogel@example.org', 'Frau', 'Nina', 'Vogel', 'de');
+insert into mock_moovin.applications (id, applicant_id, object_id, status, missing_documents, created_at) values
+('AP-5007', 'A-1007', 'OBJ-HH-001', 'eingeladen', '{}', now() - interval '3 days'),
+('AP-5008', 'A-1007', 'OBJ-B-002', 'eingeladen', '{}', now() - interval '2 days');
+insert into mock_moovin.appointments (id, application_id, starts_at, ends_at, kind, status, meeting_point) values
+('AT-9007', 'AP-5007', ((current_date + 4) + time '17:00') at time zone 'Europe/Berlin', ((current_date + 4) + time '17:30') at time zone 'Europe/Berlin', 'sammelbesichtigung', 'eingeladen', 'Vor dem Hauseingang Lindenallee 12, Hamburg'),
+('AT-9008', 'AP-5008', ((current_date + 5) + time '18:00') at time zone 'Europe/Berlin', ((current_date + 5) + time '18:30') at time zone 'Europe/Berlin', 'sammelbesichtigung', 'eingeladen', 'Foyer Haus B, Stralauer Allee 40, Berlin');
