@@ -1,5 +1,5 @@
 // ATTRAPPE der moovin Ticket-API (nur Prototyp). Implementiert docs/moovin-api.openapi.yaml
-// inkl. HMAC-Prüfung, Subject-Bindung und Idempotenz – damit Guido sieht, wie es sich verhalten soll.
+// inkl. HMAC-Prüfung, Subject-Bindung, Idempotenz und Datensparsamkeit – damit Guido sieht, wie es sich verhalten soll.
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { env } from "@/lib/env";
@@ -7,17 +7,7 @@ import { parseKeyList, verifySignature } from "@/lib/hmac";
 
 export const dynamic = "force-dynamic";
 
-const STATUS: Record<string, { label: string; next: string }> = {
-  eingegangen: { label: "Ihre Bewerbung ist eingegangen.", next: "Wir prüfen Ihre Unterlagen auf Vollständigkeit." },
-  unvollstaendig: { label: "Ihre Bewerbung ist eingegangen, es fehlen noch Unterlagen.", next: "Bitte reichen Sie die fehlenden Unterlagen nach." },
-  in_pruefung: { label: "Ihre Unterlagen werden geprüft.", next: "Wir melden uns, sobald die Prüfung abgeschlossen ist." },
-  eingeladen: { label: "Sie sind zur Besichtigung eingeladen.", next: "Bitte nehmen Sie den Besichtigungstermin wahr oder sagen Sie rechtzeitig ab." },
-  besichtigt: { label: "Sie haben die Wohnung besichtigt.", next: "Bitte bestätigen Sie Ihr Interesse, falls noch nicht geschehen. Danach stellen wir die Bewerbungen dem Eigentümer vor." },
-  beim_eigentuemer: { label: "Ihre Bewerbung liegt dem Eigentümer zur Entscheidung vor.", next: "Wir melden uns, sobald eine Entscheidung vorliegt." },
-  zusage: { label: "Sie haben eine Zusage erhalten.", next: "Ihr Ansprechpartner meldet sich wegen des Mietvertrags." },
-  absage: { label: "Die Wohnung wurde leider anderweitig vergeben.", next: "Gerne können Sie sich auf weitere Angebote bewerben." },
-  zurueckgezogen: { label: "Sie haben Ihre Bewerbung zurückgezogen.", next: "Es sind keine weiteren Schritte nötig." },
-};
+const OPEN_APPT = ["eingeladen", "bestaetigt"];
 
 /** Eingabeprüfung laut OpenAPI-Vertrag. Liefert eine Fehlermeldung (→ 400) oder null. */
 function validatePost(res0: string, res2: string | undefined, b: Record<string, any>): string | null {
@@ -30,9 +20,12 @@ function validatePost(res0: string, res2: string | undefined, b: Record<string, 
       if ((f.content_base64.length * 3) / 4 > 15 * 1024 * 1024) return `${f.filename}: größer als 15 MB`;
     }
   }
-  if (res0 === "applications" && res2 === "interest" && !["interessiert", "zurueckgezogen"].includes(b.interest)) return "interest muss interessiert oder zurueckgezogen sein";
   if (res0 === "applications" && res2 === "notes" && (typeof b.text !== "string" || !b.text || b.text.length > 4000)) return "text: 1 bis 4000 Zeichen";
-  if (res0 === "appointments" && res2 === "reschedule-request" && (typeof b.wish !== "string" || !b.wish)) return "wish fehlt";
+  if (res0 === "appointments" && res2 === "reply") {
+    if (!["zusage", "absage", "verschieben"].includes(b.answer)) return "answer muss zusage, absage oder verschieben sein";
+    if (b.answer === "verschieben" && (typeof b.comment !== "string" || !b.comment)) return "comment (Wunsch) fehlt";
+    if (b.comment !== undefined && (typeof b.comment !== "string" || b.comment.length > 500)) return "comment: höchstens 500 Zeichen";
+  }
   return null;
 }
 
@@ -89,35 +82,40 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ path: string[] 
       if (email !== subject) result = { status: 400, data: { error: "email ≠ X-Subject-Email" } };
       else if (!applicant) result = { status: 404, data: { error: "unbekannt" } };
       else {
+        // Datensparsam: nur aktuelle Bewerbungen (≤ 180 Tage; abgeschlossene nur bis 30 Tage danach), nur nötige Felder
         const apps = await sql`
-          select a.*, o.title as object_title from mock_moovin.applications a
-          join mock_moovin.objects o on o.id = a.object_id where a.applicant_id = ${applicant.id} order by a.created_at desc`;
-        const appts = await sql`select * from mock_moovin.appointments where application_id = any(${apps.map((a) => a.id)})`;
+          select a.*, o.title as object_title, o.am_email from mock_moovin.applications a
+          join mock_moovin.objects o on o.id = a.object_id
+          where a.applicant_id = ${applicant.id} and a.created_at > now() - interval '180 days'
+            and (a.status not in ('absage','zurueckgezogen') or a.created_at > now() - interval '30 days')
+          order by a.created_at desc`;
+        const appts = await sql`select * from mock_moovin.appointments where application_id = any(${apps.map((a) => a.id)}) order by starts_at desc`;
         result = {
           status: 200,
           data: {
-            applicant: { id: applicant.id, email: applicant.email, salutation: applicant.salutation, first_name: applicant.first_name, last_name: applicant.last_name, preferred_language: applicant.preferred_language },
+            applicant: { id: applicant.id, salutation: applicant.salutation || null, last_name: applicant.last_name, language: applicant.preferred_language },
             applications: apps.map((a) => {
               const appt = appts.find((x) => x.application_id === a.id);
-              const s = STATUS[a.status] ?? { label: a.status, next: "" };
               return {
-                id: a.id, object_id: a.object_id, object_title: a.object_title, status: a.status, status_label: s.label,
-                missing_documents: a.missing_documents, next_step: s.next, created_at: a.created_at,
-                appointment: appt ? { id: appt.id, starts_at: appt.starts_at, ends_at: appt.ends_at, kind: appt.kind, status: appt.status, meeting_point: appt.meeting_point } : null,
+                id: a.id, listing_id: a.object_id, object_title: a.object_title, status: a.status,
+                missing_documents: a.missing_documents, account_manager_email: a.am_email,
+                appointment: appt ? { id: appt.id, starts_at: new Date(appt.starts_at).toISOString(), ends_at: appt.ends_at ? new Date(appt.ends_at).toISOString() : null, status: appt.status, meeting_point: appt.meeting_point } : null,
               };
             }),
           },
         };
       }
-    } else if (req.method === "GET" && res0 === "objects" && res1 && !res2) {
+    } else if (req.method === "GET" && res0 === "listings" && res1 && !res2) {
+      // Nur öffentliche Inseratsdaten, nur für Inserate, auf die sich der Absender beworben hat
       const o = (await sql`select o.* from mock_moovin.objects o where o.id = ${res1}
                   and exists (select 1 from mock_moovin.applications a join mock_moovin.applicants p on p.id = a.applicant_id
                               where a.object_id = o.id and p.email = ${subject})`)[0];
       if (!o) result = { status: 404, data: { error: "unbekannt" } };
-      else {
-        const { am_name, am_email, rooms, size_sqm, rent_cold_eur, rent_warm_eur, ...rest } = o;
-        result = { status: 200, data: { ...rest, rooms: Number(rooms), size_sqm: Number(size_sqm), rent_cold_eur: Number(rent_cold_eur), rent_warm_eur: Number(rent_warm_eur), account_manager: { name: am_name, email: am_email } } };
-      }
+      else result = { status: 200, data: {
+        id: o.id, title: o.title, address: o.address, rooms: Number(o.rooms), size_sqm: Number(o.size_sqm),
+        rent_cold_eur: Number(o.rent_cold_eur), rent_warm_eur: Number(o.rent_warm_eur), available_from: o.available_from,
+        pets: o.pets, parking: o.parking, wbs_required: o.wbs_required, viewing_info: o.viewing_info, listing_url: o.listing_url,
+      } };
     } else if (req.method === "POST") {
       let b: Record<string, any> = {};
       try { b = body ? JSON.parse(body) : {}; } catch { b = { __invalid: true }; }
@@ -132,46 +130,27 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ path: string[] 
           }
           result = { status: 201, data: { stored: (b.files ?? []).length, status: "neu_unsortiert" } };
         }
-      } else if (res0 === "applications" && res1 && res2 === "interest") {
-        if (!(await owns("applications", res1))) result = { status: 404, data: { error: "unbekannt" } };
-        else {
-          await sql`update mock_moovin.applications set interest = ${b.interest},
-                    status = case when ${b.interest} = 'zurueckgezogen' then 'zurueckgezogen' else status end where id = ${res1}`;
-          if (b.interest === "zurueckgezogen")
-            await sql`update mock_moovin.appointments set status = 'abgesagt' where application_id = ${res1} and starts_at > now()`;
-          result = { status: 200, data: { interest: b.interest } };
-        }
       } else if (res0 === "applications" && res1 && res2 === "notes") {
         if (!(await owns("applications", res1))) result = { status: 404, data: { error: "unbekannt" } };
         else {
           await sql`insert into mock_moovin.notes (application_id, text, source_ticket) values (${res1}, ${String(b.text ?? "").slice(0, 4000)}, ${b.source_ticket_id})`;
           result = { status: 201, data: { ok: true } };
         }
-      } else if (res0 === "appointments" && res1 && res2 === "confirm") {
+      } else if (res0 === "appointments" && res1 && res2 === "reply") {
         if (!(await owns("appointments", res1))) result = { status: 404, data: { error: "unbekannt" } };
         else {
           const ap = (await sql`select * from mock_moovin.appointments where id = ${res1}`)[0];
-          if (ap.status === "abgesagt" || new Date(ap.starts_at) < new Date()) result = { status: 409, data: { error: "Termin abgesagt oder vergangen" } };
-          else {
+          if (!OPEN_APPT.includes(ap.status) || new Date(ap.starts_at) < new Date()) result = { status: 409, data: { error: `Termin ist ${ap.status === "abgesagt" ? "abgesagt" : "nicht mehr offen"}`, status: ap.status } };
+          else if (b.answer === "zusage") {
             await sql`update mock_moovin.appointments set status = 'bestaetigt' where id = ${res1}`;
             result = { status: 200, data: { status: "bestaetigt" } };
-          }
-        }
-      } else if (res0 === "appointments" && res1 && res2 === "cancel") {
-        if (!(await owns("appointments", res1))) result = { status: 404, data: { error: "unbekannt" } };
-        else {
-          const ap = (await sql`select * from mock_moovin.appointments where id = ${res1}`)[0];
-          if (ap.status === "abgesagt" || new Date(ap.starts_at) < new Date()) result = { status: 409, data: { error: "Termin bereits abgesagt oder vergangen" } };
-          else {
+          } else if (b.answer === "absage") {
             await sql`update mock_moovin.appointments set status = 'abgesagt' where id = ${res1}`;
-            result = { status: 200, data: { status: "abgesagt", slot_freed: true } };
+            result = { status: 200, data: { status: "abgesagt" } };
+          } else {
+            await sql`insert into mock_moovin.reschedule_requests (appointment_id, wish, source_ticket) values (${res1}, ${String(b.comment)}, ${b.source_ticket_id})`;
+            result = { status: 200, data: { status: ap.status, wish_recorded: true } };
           }
-        }
-      } else if (res0 === "appointments" && res1 && res2 === "reschedule-request") {
-        if (!(await owns("appointments", res1))) result = { status: 404, data: { error: "unbekannt" } };
-        else {
-          await sql`insert into mock_moovin.reschedule_requests (appointment_id, wish, source_ticket) values (${res1}, ${String(b.wish ?? "")}, ${b.source_ticket_id})`;
-          result = { status: 201, data: { ok: true } };
         }
       } else result = { status: 404, data: { error: "Route unbekannt" } };
     } else result = { status: 404, data: { error: "Route unbekannt" } };

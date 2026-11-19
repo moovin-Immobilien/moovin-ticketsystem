@@ -1,30 +1,42 @@
 openapi: 3.1.0
 info:
   title: moovin Ticket-API
-  version: 1.0.0
+  version: 2.0.0
   description: |
     Schmale, zweckgebundene Schnittstelle zwischen app.moovin.de und dem moovin Ticketsystem.
     Umsetzung auf moovin-Seite: IT (Guido). Im Prototyp existiert eine Attrappe unter /api/mock-moovin/v1.
+
+    ## Umfang in zwei Stufen
+    - Stufe 1 (lesen): `GET /applicants` (Pflicht), `GET /listings/{id}` (optional).
+      Damit beantwortet das Ticketsystem Fragen zu Status, Termin und fehlenden Unterlagen. Aktionen klickt der AM in moovin.
+    - Stufe 2 (schreiben): `POST /appointments/{id}/reply`, `POST /applications/{id}/documents`, `POST /applications/{id}/notes`.
 
     ## Sicherheit
     - Nur Server-zu-Server. Jede Anfrage ist HMAC-SHA256-signiert:
       `signature = hex(HMAC_SHA256(secret, timestamp + "\n" + METHOD + "\n" + path_with_query + "\n" + sha256_hex(body)))`
       Header: `X-Moovin-Key-Id`, `X-Moovin-Timestamp` (Unix-Sekunden), `X-Moovin-Signature`.
       moovin lehnt ab, wenn |jetzt − timestamp| > 300 s oder die Signatur nicht passt (constant-time compare).
-    - Zusätzlich IP-Allowlist (feste Ausgangs-IPs des Ticketsystems).
-    - Jede Anfrage trägt `X-Subject-Email` = Mailadresse des Absenders. moovin MUSS prüfen, dass jede
-      angefragte bzw. veränderte Ressource (Bewerbung, Termin, Objekt) zu dieser Mailadresse gehört → sonst 404.
+    - Jede Anfrage trägt `X-Subject-Email` = Mailadresse des Absenders. moovin prüft, dass jede angefragte bzw.
+      veränderte Ressource (Bewerbung, Termin, Inserat) zu dieser Mailadresse gehört, sonst 404.
       Damit kann selbst ein fehlerhaftes Ticketsystem keine fremden Daten lesen oder ändern.
     - Schreibende Aufrufe tragen `Idempotency-Key`; Wiederholungen mit gleichem Key liefern das erste Ergebnis.
     - Mehrere Schlüssel gleichzeitig gültig (Rotation über `X-Moovin-Key-Id`).
     - moovin protokolliert jeden Aufruf (Key-Id, Pfad, Subject-Email, Ergebnis).
-    - Statuscodes: 401 Signatur/Zeitstempel/Key-Id ungültig · 400 Pflicht-Header oder Eingabe ungültig
-      (z. B. fehlender `Idempotency-Key`, unbekannter `interest`-Wert) · 404 Ressource unbekannt ODER gehört nicht zur
-      `X-Subject-Email` (bewusst nicht unterscheidbar) · 409 Zustand passt nicht (Termin vergangen/abgesagt).
+    - Statuscodes: 401 Signatur/Zeitstempel/Key-Id ungültig · 400 Pflicht-Header oder Eingabe ungültig ·
+      404 unbekannt ODER gehört nicht zur `X-Subject-Email` (bewusst nicht unterscheidbar) · 409 Termin nicht mehr offen.
     - Konformitätstest: `scripts/api-check.ts` prüft eine Implementierung gegen diesen Vertrag.
 
-    ## Datenminimierung
-    Die API liefert **keine** Scores, Rankings, Ablehnungsgründe, Einkommensdaten oder Dokumentinhalte.
+    ## Datensparsamkeit
+    - Nur die Felder unten, keine weiteren. Keine Vornamen, Telefonnummern, Wohnadressen, Geburtsdaten,
+      Einkommens- oder Bonitätsdaten, Scores, Rankings, Ablehnungsgründe, internen Notizen, Dokumentinhalte.
+    - Nur aktuelle Bewerbungen: angelegt in den letzten 180 Tagen; abgeschlossene (absage, zurueckgezogen) nur bis 30 Tage danach.
+    - Statustexte formuliert das Ticketsystem selbst aus dem `status`-Wert.
+
+    ## Mehrere Bewerbungen: welcher Termin ist gemeint?
+    Einladungs- und Erinnerungsmails von moovin enthalten im Betreff die Termin-Referenz `[Termin <appointment.id>]`.
+    Bewerber antworten per „Antworten“, der Betreff bleibt erhalten. Das Ticketsystem ordnet so eindeutig zu.
+    Ohne Referenz: nur ein offener Termin → dieser; sonst nur, wenn Datum, Adresse oder Inserats-Kennung genau eines
+    Termins in der Mail stehen. Andernfalls keine Terminaktion, sondern Rückfrage an den Bewerber.
 servers:
   - url: https://app.moovin.de/api/ticket/v1
     description: Produktion (Vorschlag)
@@ -52,74 +64,62 @@ components:
   schemas:
     Applicant:
       type: object
-      required: [id, email, first_name, last_name]
+      additionalProperties: false
+      required: [id, last_name]
       properties:
         id: { type: string }
-        email: { type: string, format: email, description: Hinterlegte Adresse – Antworten gehen nur hierhin }
-        salutation: { type: string, enum: [Herr, Frau, divers, ""] }
-        first_name: { type: string }
-        last_name: { type: string }
-        preferred_language: { type: string, example: de }
+        salutation: { type: [string, "null"], enum: [Herr, Frau, null], description: Nur für die Anrede }
+        last_name: { type: string, description: Nur für die Anrede }
+        language: { type: [string, "null"], example: de }
     Appointment:
       type: object
+      additionalProperties: false
       required: [id, starts_at, status]
       properties:
-        id: { type: string }
-        starts_at: { type: string, format: date-time }
-        ends_at: { type: string, format: date-time }
-        kind: { type: string, enum: [sammelbesichtigung, einzelbesichtigung, uebergabe] }
+        id: { type: string, description: "Steht als [Termin <id>] im Betreff der Einladungs-/Erinnerungsmail" }
+        starts_at: { type: string, format: date-time, description: ISO 8601 mit Zeitzone }
+        ends_at: { type: [string, "null"], format: date-time }
         status: { type: string, enum: [eingeladen, bestaetigt, abgesagt, stattgefunden, no_show] }
-        meeting_point: { type: string, description: Treffpunkt/Adresse für Besichtigung }
+        meeting_point: { type: [string, "null"] }
     Application:
       type: object
-      required: [id, object_id, status, status_label]
+      additionalProperties: false
+      required: [id, listing_id, object_title, status, missing_documents]
       properties:
         id: { type: string }
-        object_id: { type: string }
-        object_title: { type: string }
-        status:
-          type: string
-          enum: [eingegangen, unvollstaendig, in_pruefung, eingeladen, besichtigt, beim_eigentuemer, zusage, absage, zurueckgezogen]
-        status_label: { type: string, description: Bewerber-taugliche Formulierung des Status }
-        missing_documents:
-          type: array
-          items: { type: string, example: Gehaltsnachweise der letzten 3 Monate }
-        next_step: { type: string, description: Bewerber-taugliche Beschreibung des nächsten Schritts }
-        appointment: { $ref: '#/components/schemas/Appointment' }
-        created_at: { type: string, format: date-time }
+        listing_id: { type: string, example: MV-ABC123 }
+        object_title: { type: string, description: Wie im Inserat, example: "2-Zimmer, Lindenallee 12, Hamburg" }
+        status: { type: string, enum: [eingegangen, unvollstaendig, in_pruefung, eingeladen, besichtigt, beim_eigentuemer, zusage, absage, zurueckgezogen] }
+        missing_documents: { type: array, items: { type: string }, description: Nur Dokumentarten, z. B. "SCHUFA-Auskunft" }
+        account_manager_email: { type: [string, "null"], format: email, description: Für die Zuweisung des Tickets }
+        appointment:
+          oneOf: [{ $ref: "#/components/schemas/Appointment" }, { type: "null" }]
+          description: Nächster offener, sonst letzter Termin dieser Bewerbung
     ApplicantContext:
       type: object
+      additionalProperties: false
       required: [applicant, applications]
       properties:
-        applicant: { $ref: '#/components/schemas/Applicant' }
-        applications:
-          type: array
-          items: { $ref: '#/components/schemas/Application' }
-    ObjectInfo:
+        applicant: { $ref: "#/components/schemas/Applicant" }
+        applications: { type: array, items: { $ref: "#/components/schemas/Application" } }
+    Listing:
       type: object
+      description: Nur öffentliche Inseratsdaten
       required: [id, title, address]
       properties:
         id: { type: string }
         title: { type: string }
         address: { type: string }
-        district: { type: string }
-        city: { type: string }
-        rooms: { type: number }
-        size_sqm: { type: number }
-        rent_cold_eur: { type: number }
-        rent_warm_eur: { type: number }
-        available_from: { type: string, format: date }
-        pets: { type: string, example: Kleintiere erlaubt, Hunde nach Absprache }
-        parking: { type: string }
-        wbs_required: { type: boolean }
-        viewing_info: { type: string, description: Ablauf der Besichtigung, Treffpunkt, Mitzubringendes }
-        application_info: { type: string, description: Ablauf der Bewerbung, benötigte Unterlagen }
-        listing_url: { type: string, format: uri }
-        account_manager:
-          type: object
-          properties:
-            name: { type: string }
-            email: { type: string, format: email }
+        rooms: { type: [number, "null"] }
+        size_sqm: { type: [number, "null"] }
+        rent_cold_eur: { type: [number, "null"] }
+        rent_warm_eur: { type: [number, "null"] }
+        available_from: { type: [string, "null"], format: date }
+        pets: { type: [string, "null"] }
+        parking: { type: [string, "null"] }
+        wbs_required: { type: [boolean, "null"] }
+        viewing_info: { type: [string, "null"] }
+        listing_url: { type: [string, "null"] }
     Error:
       type: object
       properties:
@@ -127,33 +127,59 @@ components:
 paths:
   /applicants:
     get:
-      summary: Bewerber-Kontext zu einer Mailadresse
-      description: Liefert Bewerber und alle seine Bewerbungen inkl. Termine. Schlüssel ist die Mailadresse (case-insensitive).
+      summary: "Stufe 1 · Bewerber und aktuelle Bewerbungen zur Absender-Mailadresse"
       parameters:
-        - $ref: '#/components/parameters/SubjectEmail'
+        - $ref: "#/components/parameters/SubjectEmail"
         - name: email
           in: query
           required: true
+          description: Muss gleich X-Subject-Email sein (Groß-/Kleinschreibung egal), sonst 400
           schema: { type: string, format: email }
-          description: Muss identisch mit X-Subject-Email sein.
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ApplicantContext' } } } }
-        '404': { description: Unbekannte Adresse }
-  /objects/{objectId}:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ApplicantContext" } } } }
+        "404": { description: Adresse unbekannt }
+  /listings/{listingId}:
     get:
-      summary: Objektinfos für Antworten und Wissensdatenbank
+      summary: "Stufe 1, optional · Öffentliche Inseratsdaten (nur Inserate, auf die sich der Absender beworben hat)"
       parameters:
-        - $ref: '#/components/parameters/SubjectEmail'
-        - { name: objectId, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/SubjectEmail"
+        - { name: listingId, in: path, required: true, schema: { type: string } }
       responses:
-        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ObjectInfo' } } } }
-        '404': { description: Unbekannt oder Subject hat sich nicht auf dieses Objekt beworben }
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Listing" } } } }
+        "404": { description: Unbekannt oder nicht zum Absender gehörig }
+  /appointments/{appointmentId}/reply:
+    post:
+      summary: "Stufe 2 · Antwort des Bewerbers auf eine Einladung: zusagen, absagen oder Verschiebewunsch"
+      description: |
+        zusage → Status bestaetigt (bereits bestätigt → 200). absage → Status abgesagt, Platz wird frei.
+        verschieben → Termin bleibt, der Wunsch (comment) landet beim AM als Aufgabe/Notiz.
+        Termin abgesagt, vergangen oder stattgefunden → 409.
+      parameters:
+        - $ref: "#/components/parameters/SubjectEmail"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - { name: appointmentId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_ticket_id, answer]
+              properties:
+                source_ticket_id: { type: string, example: T-123 }
+                answer: { type: string, enum: [zusage, absage, verschieben] }
+                comment: { type: string, maxLength: 500, description: Pflicht bei verschieben (Wunsch des Bewerbers) }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { status: { type: string } } } } } }
+        "400": { description: Eingabe ungültig }
+        "404": { description: Unbekannt oder nicht zum Absender gehörig }
+        "409": { description: Termin nicht mehr offen }
   /applications/{applicationId}/documents:
     post:
-      summary: Anhänge ungelesen an die Bewerbung hängen
+      summary: "Stufe 2 · Mail-Anhänge an der Bewerbung ablegen (Status „neu, ungeprüft“; geprüft wird wie bisher in moovin)"
       parameters:
-        - $ref: '#/components/parameters/SubjectEmail'
-        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: "#/components/parameters/SubjectEmail"
+        - $ref: "#/components/parameters/IdempotencyKey"
         - { name: applicationId, in: path, required: true, schema: { type: string } }
       requestBody:
         required: true
@@ -161,7 +187,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [files, source_ticket_id]
+              required: [source_ticket_id, files]
               properties:
                 source_ticket_id: { type: string }
                 files:
@@ -173,90 +199,20 @@ paths:
                     properties:
                       filename: { type: string }
                       content_type: { type: string }
-                      content_base64: { type: string, description: max. 15 MB je Datei }
+                      content_base64: { type: string, description: höchstens 15 MB je Datei }
       responses:
-        '201': { description: Abgelegt (Status „neu, unsortiert“) }
-  /appointments/{appointmentId}/confirm:
-    post:
-      summary: Teilnahme am Termin bestätigen (Antwort auf „Rückmeldung erforderlich“)
-      parameters:
-        - $ref: '#/components/parameters/SubjectEmail'
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - { name: appointmentId, in: path, required: true, schema: { type: string } }
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [source_ticket_id]
-              properties:
-                source_ticket_id: { type: string }
-      responses:
-        '200': { description: Bestätigt }
-        '409': { description: Termin abgesagt oder vergangen }
-  /appointments/{appointmentId}/cancel:
-    post:
-      summary: Termin absagen (Slot wird frei)
-      parameters:
-        - $ref: '#/components/parameters/SubjectEmail'
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - { name: appointmentId, in: path, required: true, schema: { type: string } }
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [source_ticket_id]
-              properties:
-                source_ticket_id: { type: string }
-                comment: { type: string }
-      responses:
-        '200': { description: Abgesagt }
-        '409': { description: Termin liegt in der Vergangenheit oder ist bereits abgesagt }
-  /appointments/{appointmentId}/reschedule-request:
-    post:
-      summary: Verschiebe-Wunsch an AM übermitteln (keine automatische Umbuchung in V1)
-      parameters:
-        - $ref: '#/components/parameters/SubjectEmail'
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - { name: appointmentId, in: path, required: true, schema: { type: string } }
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [source_ticket_id, wish]
-              properties:
-                source_ticket_id: { type: string }
-                wish: { type: string, example: Lieber am Samstagvormittag }
-      responses:
-        '201': { description: Wunsch erfasst }
-  /applications/{applicationId}/interest:
-    post:
-      summary: Interesse bestätigen oder Bewerbung zurückziehen
-      parameters:
-        - $ref: '#/components/parameters/SubjectEmail'
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - { name: applicationId, in: path, required: true, schema: { type: string } }
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [source_ticket_id, interest]
-              properties:
-                source_ticket_id: { type: string }
-                interest: { type: string, enum: [interessiert, zurueckgezogen] }
-      responses:
-        '200': { description: Gesetzt }
+        "201": { description: Abgelegt }
+        "400": { description: Eingabe ungültig }
+        "404": { description: Unbekannt oder nicht zum Absender gehörig }
   /applications/{applicationId}/notes:
     post:
-      summary: Notiz am Bewerber (Zusammenfassung der Mail für den AM)
+      summary: "Stufe 2 · Notiz an der Bewerbung für den AM (z. B. Rückzug, Interesse, Hinweise aus der Mail)"
       parameters:
-        - $ref: '#/components/parameters/SubjectEmail'
-        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: "#/components/parameters/SubjectEmail"
+        - $ref: "#/components/parameters/IdempotencyKey"
         - { name: applicationId, in: path, required: true, schema: { type: string } }
       requestBody:
+        required: true
         content:
           application/json:
             schema:
@@ -265,6 +221,8 @@ paths:
               properties:
                 source_ticket_id: { type: string }
                 text: { type: string, maxLength: 4000 }
-                ticket_url: { type: string, format: uri }
+                ticket_url: { type: string, description: Link zurück ins Ticket }
       responses:
-        '201': { description: Angelegt }
+        "201": { description: Angelegt }
+        "400": { description: Eingabe ungültig }
+        "404": { description: Unbekannt oder nicht zum Absender gehörig }
