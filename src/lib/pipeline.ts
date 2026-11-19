@@ -168,8 +168,12 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
       a.appointment_id = apptResolution.id;
       a.application_id = ctx.applications.find((x) => x.appointment?.id === apptResolution.id)?.id ?? "";
     }
-    if (["dokumente_ablegen", "interesse_setzen", "notiz"].includes(a.type) && !appIds.has(a.application_id)) continue;
-    if (a.type === "dokumente_ablegen" && !atts.length) continue;
+    if (a.type === "dokumente_ablegen") {
+      // Dokumente liegen in moovin am Bewerber (Profil), nicht an einer Bewerbung → keine Zuordnung nötig
+      if (!atts.length) continue;
+      a.application_id = ""; a.appointment_id = "";
+    }
+    if (["interesse_setzen", "notiz"].includes(a.type) && !appIds.has(a.application_id)) continue;
     if (a.type === "interesse_setzen" && !["interessiert", "zurueckgezogen"].includes(a.interest)) continue;
     const k = `${a.type}:${a.application_id}:${a.appointment_id}`;
     if (seen.has(k)) continue;
@@ -229,7 +233,7 @@ function actionLabel(a: ProposedAction, ctx: ApplicantContext | null): string {
   const app = ctx?.applications.find((x) => x.id === a.application_id || x.appointment?.id === a.appointment_id);
   const when = app?.appointment ? new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", dateStyle: "short", timeStyle: "short" }).format(new Date(app.appointment.starts_at)) : "";
   switch (a.type) {
-    case "dokumente_ablegen": return `Anhänge an Bewerbung ${a.application_id} (${app?.object_title ?? ""}) ablegen`;
+    case "dokumente_ablegen": return `Anhänge im Bewerberprofil ${ctx?.applicant.id ?? ""} ablegen`;
     case "termin_bestaetigen": return `Teilnahme am Termin ${when} bestätigen`;
     case "termin_absagen": return `Termin ${when} absagen und Slot freigeben`;
     case "termin_verschieben_wunsch": return `Verschiebe-Wunsch für Termin ${when} an AM: „${a.text.slice(0, 120)}“`;
@@ -286,7 +290,7 @@ export async function sendDraft(opts: { ticketId: number; draftId: number; actor
 }
 
 export async function executeAction(actionId: number, actor: string): Promise<{ id: number; ok: boolean; error?: string }> {
-  const [a] = await sql`select a.*, t.sender_email, t.sender_verified from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
+  const [a] = await sql`select a.*, t.sender_email, t.sender_verified, t.applicant_id from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
   if (!a) return { id: actionId, ok: false, error: "nicht gefunden" };
   if (a.status !== "vorgeschlagen") return { id: actionId, ok: false, error: `Status ${a.status}` };
   if (!a.sender_verified && !INTERNAL_ACTIONS.includes(a.type)) {
@@ -302,7 +306,8 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
       case "dokumente_ablegen": {
         const [d] = await sql`select in_message_id from ticket.drafts where id = ${a.draft_id}`;
         const files = await sql`select id, filename, content_type, content from ticket.attachments where message_id = ${d.in_message_id}`;
-        result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/documents`, {
+        if (!a.applicant_id) throw new Error("Bewerber in moovin unbekannt");
+        result = await client.post(`/applicants/${encodeURIComponent(a.applicant_id)}/documents`, {
           source_ticket_id: src,
           files: files.map((f) => ({ filename: f.filename, content_type: f.content_type, content_base64: Buffer.from(f.content).toString("base64") })),
         }, a.idempotency_key);

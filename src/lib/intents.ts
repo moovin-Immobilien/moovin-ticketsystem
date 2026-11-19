@@ -29,7 +29,7 @@ export const ACTION_TYPES = ["dokumente_ablegen", "termin_bestaetigen", "termin_
 export type ActionType = (typeof ACTION_TYPES)[number];
 
 export const ACTION_LABEL: Record<ActionType, string> = {
-  dokumente_ablegen: "Anhänge an Bewerbung ablegen",
+  dokumente_ablegen: "Anhänge im Bewerberprofil ablegen",
   termin_bestaetigen: "Teilnahme am Termin bestätigen",
   termin_absagen: "Termin absagen (Slot freigeben)",
   termin_verschieben_wunsch: "Verschiebe-Wunsch an AM übermitteln",
