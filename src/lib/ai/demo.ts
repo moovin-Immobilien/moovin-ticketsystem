@@ -91,7 +91,12 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
       const q = intent === "wohnungssuche_allgemein" ? "Wohnung finden bewerben Suchagent" : intent === "konto_datenschutz" ? "Konto Daten löschen Datenschutz" : text;
       const hits = await i.tools.searchKnowledge(q);
       body = hits.length ? `vielen Dank für Ihre Nachricht. ${hits[0].body.replace(/\s*Quelle:.*$/, "")}` : "vielen Dank für Ihre Nachricht. [AM: bitte beantworten]";
-      needs = !hits.length; reason = needs ? "Keine passende Info in der Wissensdatenbank" : ""; conf = hits.length ? 0.75 : 0.3; break;
+      needs = !hits.length; reason = needs ? "Keine passende Info in der Wissensdatenbank" : ""; conf = hits.length ? 0.75 : 0.3;
+      if (intent === "konto_datenschutz") {
+        body = "vielen Dank für Ihre Nachricht. Wir haben Ihre Anfrage an unser Datenschutzteam weitergeleitet. Es bearbeitet sie und meldet sich bei Ihnen. Bitte beachten Sie, dass laufende Bewerbungen mit der Löschung enden.";
+        act({ type: "datenschutz_weiterleiten", text: "Datenschutzanfrage per Mail" }); needs = false; reason = ""; conf = 0.85;
+      }
+      break;
     }
     case "spam":
       body = ""; needs = true; reason = "Vermutlich Spam – ohne Antwort schließen"; conf = 0.7; break;
