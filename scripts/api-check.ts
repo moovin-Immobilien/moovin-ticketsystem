@@ -195,6 +195,12 @@ async function main() {
   const OWN_APPLICANT = String(ctx?.applicant?.id ?? "unbekannt");
   await check("Dokumente an fremdes Bewerberprofil → 404", async () =>
     expect(await call("POST", `/applicants/${enc(OWN_APPLICANT)}/documents`, { body: { source_ticket_id: "api-check", files: [] }, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
+  const copyBody = { source_ticket_id: "api-check", ticket_url: "https://example.invalid/tickets/0", messages: [
+    { direction: "in", sent_at: new Date().toISOString(), from: OWN_EMAIL, to: "mieter@moovin.de", subject: "Konformitätstest", text: "Testmail – bitte ignorieren", attachments: [], sender_verified: true },
+    { direction: "out", sent_at: new Date().toISOString(), from: "mieter@moovin.de", to: OWN_EMAIL, subject: "Re: Konformitätstest", text: "Testantwort – bitte ignorieren", attachments: [], sent_by: "KI" },
+  ] };
+  await check("Optional: Kopie in fremdes Bewerberprofil → 404", async () =>
+    expect(await call("POST", `/applicants/${enc(OWN_APPLICANT)}/correspondence`, { body: copyBody, idem: randomUUID(), subject: FOREIGN_EMAIL }), [404]));
 
   if (WRITE) {
     console.log("\n5 Schreiben (Testdaten werden verändert)");
@@ -210,6 +216,8 @@ async function main() {
       idem: randomUUID(),
       body: { source_ticket_id: "api-check", files: [{ filename: "api-check.txt", content_type: "text/plain", content_base64: Buffer.from("Konformitätstest").toString("base64") }] },
     }), [201]));
+    await check("Optional: Kopie von Mail und Antwort ablegen → 201 (404 = nicht gebaut)", async () =>
+      expect(await call("POST", `/applicants/${enc(OWN_APPLICANT)}/correspondence`, { body: copyBody, idem: randomUUID() }), [201, 404]));
     await check("Verschiebewunsch → 200", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "verschieben", comment: "Test: lieber Samstagvormittag" } }), [200]));
     await check("Verschiebewunsch ohne comment → 400", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "verschieben" } }), [400, 422]));
     await check("Termin zusagen → 200 (409 falls schon abgesagt/vergangen)", async () => expect(await call("POST", `/appointments/${enc(OWN_APPT)}/reply`, { idem: randomUUID(), body: { source_ticket_id: "api-check", answer: "zusage" } }), [200, 409]));
