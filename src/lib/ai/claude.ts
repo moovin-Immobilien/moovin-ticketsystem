@@ -69,7 +69,7 @@ export async function runClaudeAgent(i: AgentInput): Promise<AgentOutput> {
   for (let turn = 0; turn < 6; turn++) {
     const res = await client.messages.create({
       model,
-      max_tokens: 6000,
+      max_tokens: 12000,
       system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
       tools: TOOLS,
       messages,
@@ -103,8 +103,18 @@ export async function runClaudeAgent(i: AgentInput): Promise<AgentOutput> {
     }
 
     const text = res.content.filter((b): b is Anthropic.TextBlock => b.type === "text").map((b) => b.text).join("");
-    const parsed = JSON.parse(text) as AgentResult;
-    return { result: parsed, model, usage, toolCalls };
+    try {
+      const parsed = JSON.parse(text) as AgentResult;
+      return { result: parsed, model, usage, toolCalls };
+    } catch {
+      // Abgeschnittene oder ungültige Ausgabe (z. B. stop_reason max_tokens): einmal neu anfordern
+      if (res.stop_reason === "max_tokens" || turn < 5) {
+        messages.push({ role: "assistant", content: res.content });
+        messages.push({ role: "user", content: "Deine letzte Ausgabe war kein vollständiges JSON. Gib die Analyse jetzt erneut, kurz und vollständig, als gültiges JSON gemäß Schema aus." });
+        continue;
+      }
+      throw new Error(`Claude: ungültige Ausgabe (${res.stop_reason})`);
+    }
   }
   throw new Error("Claude: zu viele Werkzeug-Runden");
 }

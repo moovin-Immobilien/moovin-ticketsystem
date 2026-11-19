@@ -5,6 +5,8 @@ import type { Intent } from "../intents";
 const RULES: [Intent, RegExp][] = [
   ["spam", /(seo|backlinks|crypto|gewinnspiel|viagra|unsubscribe)/i],
   ["beschwerde", /(beschwer|unverschämt|frechheit|anwalt|unzufrieden|complain)/i],
+  ["konto_datenschutz", /(konto löschen|account löschen|daten löschen|löschung meiner|datenschutz|dsgvo|newsletter abmelden|delete my (account|data))/i],
+  ["technik_login", /(passwort|login|einloggen|anmelden geht nicht|fehlermeldung|lädt nicht|nect|selbstauskunft funktioniert)/i],
   ["nicht_zustaendig", /(heizung|schimmel|nebenkostenabrechnung|mangel|meine wohnung .* defekt|hausverwaltung)/i],
   ["rueckzug", /(zurückziehen|kein interesse mehr|ziehe .* zurück|anderweitig fündig|withdraw)/i],
   ["termin_verschieben", /(verschieben|anderen termin|später kommen|reschedule|other (time|date))/i],
@@ -39,7 +41,7 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
   let reason = "";
   let conf = 0.8;
 
-  if (!ctx && !["spam", "nicht_zustaendig", "beschwerde"].includes(intent)) {
+  if (!ctx && !["spam", "nicht_zustaendig", "beschwerde", "wohnungssuche_allgemein", "konto_datenschutz", "technik_login"].includes(intent)) {
     body = "vielen Dank für Ihre Nachricht. Leider können wir Ihre Mailadresse keiner Bewerbung zuordnen. Bitte schreiben Sie uns von der Adresse, mit der Sie sich beworben haben, oder nennen Sie uns Objekt und Namen, unter dem die Bewerbung erfolgt ist.";
     conf = 0.7;
   } else switch (intent) {
@@ -83,6 +85,14 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
       body = "vielen Dank für Ihre Nachricht. Es tut uns leid, dass Sie unzufrieden sind. [AM: bitte persönlich antworten]"; needs = true; reason = "Beschwerde"; conf = 0.6; break;
     case "nicht_zustaendig":
       body = "vielen Dank für Ihre Nachricht. Für Anliegen zu bestehenden Mietverhältnissen ist die jeweilige Hausverwaltung zuständig. [AM: Ansprechpartner ergänzen]"; needs = true; reason = "Kein Interessenten-Anliegen"; conf = 0.6; break;
+    case "wohnungssuche_allgemein":
+    case "konto_datenschutz":
+    case "technik_login": {
+      const q = intent === "wohnungssuche_allgemein" ? "Wohnung finden bewerben Suchagent" : intent === "konto_datenschutz" ? "Konto Daten löschen Datenschutz" : text;
+      const hits = await i.tools.searchKnowledge(q);
+      body = hits.length ? `vielen Dank für Ihre Nachricht. ${hits[0].body.replace(/\s*Quelle:.*$/, "")}` : "vielen Dank für Ihre Nachricht. [AM: bitte beantworten]";
+      needs = !hits.length; reason = needs ? "Keine passende Info in der Wissensdatenbank" : ""; conf = hits.length ? 0.75 : 0.3; break;
+    }
     case "spam":
       body = ""; needs = true; reason = "Vermutlich Spam – ohne Antwort schließen"; conf = 0.7; break;
     default:
