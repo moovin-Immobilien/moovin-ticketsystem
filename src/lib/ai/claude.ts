@@ -13,8 +13,8 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "get_object_info",
-    description: "Objektinfos (Adresse, Größe, Miete, Bezugstermin, Haustiere, Parken, WBS, Ablauf Besichtigung/Bewerbung). Nur für Objekte, auf die sich der Absender beworben hat.",
-    input_schema: { type: "object", properties: { object_id: { type: "string" } }, required: ["object_id"], additionalProperties: false },
+    description: "Öffentliche Inseratsdaten (Adresse, Größe, Miete, Bezugstermin, Haustiere, Parken, WBS, Ablauf Besichtigung). Nur für Inserate, auf die sich der Absender beworben hat; listing_id aus get_application_status.",
+    input_schema: { type: "object", properties: { listing_id: { type: "string" } }, required: ["listing_id"], additionalProperties: false },
   },
   {
     name: "search_knowledge",
@@ -90,7 +90,7 @@ export async function runClaudeAgent(i: AgentInput): Promise<AgentOutput> {
         try {
           const input = block.input as Record<string, string>;
           if (block.name === "get_application_status") out = (await i.tools.getApplicationStatus()) ?? { info: "Absender in moovin unbekannt" };
-          else if (block.name === "get_object_info") out = (await i.tools.getObjectInfo(String(input.object_id ?? ""))) ?? { info: "Objekt nicht gefunden oder nicht freigegeben" };
+          else if (block.name === "get_object_info") out = (await i.tools.getObjectInfo(String(input.listing_id ?? input.object_id ?? ""))) ?? { info: "Inserat nicht gefunden oder nicht freigegeben" };
           else if (block.name === "search_knowledge") out = await i.tools.searchKnowledge(String(input.query ?? ""));
           else out = { error: "Unbekanntes Werkzeug" };
         } catch (e) {
