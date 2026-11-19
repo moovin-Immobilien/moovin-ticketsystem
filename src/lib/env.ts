@@ -25,6 +25,8 @@ export const env = {
   inboundAddress: () => process.env.INBOUND_ADDRESS ?? "mieter@moovin.de",
   // Löschungs-/Auskunftsanfragen nach DSGVO werden hierhin weitergeleitet
   datenschutzAddress: () => process.env.DATENSCHUTZ_ADDRESS ?? "datenschutz@moovin.de",
+  // Option: Kopie von Mail und Antwort im Bewerber in moovin ablegen (POST /applicants/{id}/correspondence); "0" schaltet ab
+  copyCorrespondence: () => (process.env.MOOVIN_COPY_CORRESPONDENCE ?? "1") === "1",
   // Ausgang
   postmarkToken: () => process.env.POSTMARK_SERVER_TOKEN ?? "",
   fromAddress: () => process.env.MAIL_FROM ?? "moovin Vermietung <mieter@moovin.de>",
