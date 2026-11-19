@@ -8,7 +8,7 @@ info:
 
     ## Umfang: fünf Aufrufe
     - Lesen: `GET /applicants`, `GET /listings/{id}`.
-    - Schreiben: `POST /appointments/{id}/reply`, `POST /applications/{id}/documents`, `POST /applications/{id}/notes`.
+    - Schreiben: `POST /appointments/{id}/reply`, `POST /applicants/{id}/documents`, `POST /applications/{id}/notes`.
 
     ## Sicherheit
     - Nur Server-zu-Server. Jede Anfrage ist HMAC-SHA256-signiert:
@@ -173,13 +173,14 @@ paths:
         "400": { description: Eingabe ungültig }
         "404": { description: Unbekannt oder nicht zum Absender gehörig }
         "409": { description: Termin nicht mehr offen }
-  /applications/{applicationId}/documents:
+  /applicants/{applicantId}/documents:
     post:
-      summary: "Mail-Anhänge an der Bewerbung ablegen (Status „neu, ungeprüft“; geprüft wird wie bisher in moovin)"
+      summary: "Mail-Anhänge im Bewerberprofil ablegen (gilt für alle Bewerbungen; Status „neu, ungeprüft“; geprüft wird wie bisher in moovin)"
+      description: applicantId = applicant.id aus GET /applicants; muss zur X-Subject-Email gehören, sonst 404.
       parameters:
         - $ref: "#/components/parameters/SubjectEmail"
         - $ref: "#/components/parameters/IdempotencyKey"
-        - { name: applicationId, in: path, required: true, schema: { type: string } }
+        - { name: applicantId, in: path, required: true, schema: { type: string } }
       requestBody:
         required: true
         content:
