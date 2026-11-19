@@ -20,6 +20,13 @@ function validatePost(res0: string, res2: string | undefined, b: Record<string, 
       if ((f.content_base64.length * 3) / 4 > 15 * 1024 * 1024) return `${f.filename}: größer als 15 MB`;
     }
   }
+  if (res0 === "applicants" && res2 === "correspondence") {
+    if (!Array.isArray(b.messages) || !b.messages.length || b.messages.length > 20) return "messages: Array mit 1 bis 20 Nachrichten erwartet";
+    for (const m of b.messages) {
+      if (!["in", "out"].includes(m?.direction)) return "direction muss in oder out sein";
+      if (typeof m?.text !== "string" || m.text.length > 20000) return "text: Pflicht, höchstens 20000 Zeichen";
+    }
+  }
   if (res0 === "applications" && res2 === "notes" && (typeof b.text !== "string" || !b.text || b.text.length > 4000)) return "text: 1 bis 4000 Zeichen";
   if (res0 === "appointments" && res2 === "reply") {
     if (!["zusage", "absage", "verschieben"].includes(b.answer)) return "answer muss zusage, absage oder verschieben sein";
@@ -130,6 +137,17 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ path: string[] 
             await sql`insert into mock_moovin.documents (applicant_id, filename, content_type, size_bytes, source_ticket) values (${res1}, ${f.filename}, ${f.content_type}, ${size}, ${b.source_ticket_id})`;
           }
           result = { status: 201, data: { stored: (b.files ?? []).length, status: "neu_unsortiert" } };
+        }
+      } else if (res0 === "applicants" && res1 && res2 === "correspondence") {
+        // Option: Kopie von Mail und Antwort im Bewerber; nur der eigene Bewerber, sonst 404
+        if (!applicant || applicant.id !== res1) result = { status: 404, data: { error: "unbekannt" } };
+        else {
+          for (const m of b.messages) {
+            await sql`insert into mock_moovin.correspondence (applicant_id, application_id, source_ticket, ticket_url, direction, sent_at, from_email, to_email, subject, body, attachments, sender_verified, sent_by)
+              values (${res1}, ${b.application_id ?? null}, ${b.source_ticket_id}, ${b.ticket_url ?? null}, ${m.direction}, ${m.sent_at ?? null}, ${m.from ?? null}, ${m.to ?? null}, ${m.subject ?? null},
+                      ${m.text}, ${Array.isArray(m.attachments) ? m.attachments.map(String) : []}, ${m.sender_verified ?? null}, ${m.sent_by ?? null})`;
+          }
+          result = { status: 201, data: { stored: b.messages.length } };
         }
       } else if (res0 === "applications" && res1 && res2 === "notes") {
         if (!(await owns("applications", res1))) result = { status: 404, data: { error: "unbekannt" } };
