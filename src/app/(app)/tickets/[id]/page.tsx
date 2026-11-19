@@ -133,19 +133,19 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
             {ctx && (
               <div className="space-y-3 text-sm">
                 <div>
-                  <div className="font-medium">{ctx.applicant.salutation} {ctx.applicant.first_name} {ctx.applicant.last_name}</div>
-                  <div className="text-muted">{ctx.applicant.email} · {ctx.applicant.id}</div>
+                  <div className="font-medium">{ctx.applicant.salutation} {ctx.applicant.last_name}</div>
+                  <div className="text-muted">{t.sender_email} · {ctx.applicant.id}</div>
                 </div>
                 {ctx.applications.map((a) => (
                   <div key={a.id} className="rounded-lg border border-line p-3 space-y-1.5">
                     <div className="font-medium text-ink">{a.object_title}</div>
-                    <div className="text-xs text-muted">{a.id} · {a.status}</div>
+                    <div className="text-xs text-muted">{a.listing_id} · {a.id} · {a.status}</div>
                     <div>{a.status_label}</div>
                     {a.missing_documents.length > 0 && (
                       <div className="text-xs"><span className="text-pink font-medium">Fehlt:</span> {a.missing_documents.join(", ")}</div>
                     )}
                     {a.appointment && (
-                      <div className="text-xs text-muted">Termin: {fmtLong(a.appointment.starts_at)} · {a.appointment.status}<br />{a.appointment.meeting_point}</div>
+                      <div className="text-xs text-muted">Termin {a.appointment.id}: {fmtLong(a.appointment.starts_at)} · {a.appointment.status}<br />{a.appointment.meeting_point}</div>
                     )}
                   </div>
                 ))}

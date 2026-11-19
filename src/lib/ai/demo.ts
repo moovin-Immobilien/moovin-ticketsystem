@@ -1,6 +1,7 @@
 // Demo-Modus ohne API-Key: einfache Regeln statt Claude, damit Oberfläche und Abläufe testbar sind.
 import type { AgentInput, AgentOutput, AgentResult, ProposedAction } from "./types";
 import type { Intent } from "../intents";
+import { resolveAppointment } from "../appointments";
 
 const RULES: [Intent, RegExp][] = [
   ["spam", /(seo|backlinks|crypto|gewinnspiel|viagra|unsubscribe)/i],
@@ -30,8 +31,9 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
   if (i.attachments.length && intent === "sonstiges") intent = "unterlagen_nachreichen";
   const ctx = i.context;
   const a = ctx?.applicant;
-  const app = ctx?.applications[0];
-  const appt = app?.appointment && app.appointment.status !== "abgesagt" ? app.appointment : null;
+  const res = resolveAppointment(ctx, i.subject, i.newMessage);
+  const app = ctx?.applications.find((x) => res.id && x.appointment?.id === res.id) ?? ctx?.applications[0];
+  const appt = res.id ? app?.appointment ?? null : null;
   const greet = en ? (a ? `Dear ${a.salutation === "Frau" ? "Ms" : "Mr"} ${a.last_name},` : "Hello,") : a ? `Guten Tag ${a.salutation ? a.salutation + " " : ""}${a.last_name},` : "Guten Tag,";
   const bye = en ? "Kind regards\nYour moovin letting team" : "Viele Grüße\nIhr moovin Vermietungsteam";
   const actions: ProposedAction[] = [];
@@ -79,7 +81,7 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
       body = "vielen Dank, wir haben Ihr Interesse vermerkt und melden uns, sobald der Eigentümer entschieden hat.";
       if (app) act({ type: "interesse_setzen", application_id: app.id, interest: "interessiert" }); conf = 0.85; break;
     case "rueckzug":
-      body = "vielen Dank für Ihre Rückmeldung. Wir haben Ihre Bewerbung zurückgezogen" + (appt ? " und den Besichtigungstermin freigegeben" : "") + ". Wir wünschen Ihnen alles Gute bei der Wohnungssuche.";
+      body = "vielen Dank für Ihre Rückmeldung. Wir haben vermerkt, dass Sie Ihre Bewerbung zurückziehen. Wir wünschen Ihnen alles Gute bei der Wohnungssuche.";
       if (app) act({ type: "interesse_setzen", application_id: app.id, interest: "zurueckgezogen" }); conf = 0.88; break;
     case "beschwerde":
       body = "vielen Dank für Ihre Nachricht. Es tut uns leid, dass Sie unzufrieden sind. [AM: bitte persönlich antworten]"; needs = true; reason = "Beschwerde"; conf = 0.6; break;
