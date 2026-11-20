@@ -21,16 +21,12 @@ function validatePost(res0: string, res2: string | undefined, b: Record<string, 
     }
   }
   if (res0 === "applicants" && res2 === "correspondence") {
-    if (!Array.isArray(b.messages) || !b.messages.length || b.messages.length > 20) return "messages: Array mit 1 bis 20 Nachrichten erwartet";
-    for (const m of b.messages) {
-      if (!["in", "out"].includes(m?.direction)) return "direction muss in oder out sein";
-      if (typeof m?.text !== "string" || m.text.length > 20000) return "text: Pflicht, höchstens 20000 Zeichen";
-    }
+    if (!["in", "out"].includes(b.direction)) return "direction muss in oder out sein";
+    if (typeof b.text !== "string" || b.text.length > 20000) return "text: Pflicht, höchstens 20000 Zeichen";
   }
   if (res0 === "applications" && res2 === "notes" && (typeof b.text !== "string" || !b.text || b.text.length > 4000)) return "text: 1 bis 4000 Zeichen";
   if (res0 === "appointments" && res2 === "reply") {
-    if (!["zusage", "absage", "verschieben"].includes(b.answer)) return "answer muss zusage, absage oder verschieben sein";
-    if (b.answer === "verschieben" && (typeof b.comment !== "string" || !b.comment)) return "comment (Wunsch) fehlt";
+    if (!["zusage", "absage"].includes(b.answer)) return "answer muss zusage oder absage sein";
     if (b.comment !== undefined && (typeof b.comment !== "string" || b.comment.length > 500)) return "comment: höchstens 500 Zeichen";
   }
   return null;
@@ -142,12 +138,10 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ path: string[] 
         // Option: Kopie von Mail und Antwort im Bewerber; nur der eigene Bewerber, sonst 404
         if (!applicant || applicant.id !== res1) result = { status: 404, data: { error: "unbekannt" } };
         else {
-          for (const m of b.messages) {
-            await sql`insert into mock_moovin.correspondence (applicant_id, application_id, source_ticket, ticket_url, direction, sent_at, from_email, to_email, subject, body, attachments, sender_verified, sent_by)
-              values (${res1}, ${b.application_id ?? null}, ${b.source_ticket_id}, ${b.ticket_url ?? null}, ${m.direction}, ${m.sent_at ?? null}, ${m.from ?? null}, ${m.to ?? null}, ${m.subject ?? null},
-                      ${m.text}, ${Array.isArray(m.attachments) ? m.attachments.map(String) : []}, ${m.sender_verified ?? null}, ${m.sent_by ?? null})`;
-          }
-          result = { status: 201, data: { stored: b.messages.length } };
+          await sql`insert into mock_moovin.correspondence (applicant_id, application_id, source_ticket, ticket_url, direction, sent_at, from_email, to_email, subject, body, attachments, sender_verified, sent_by)
+            values (${res1}, ${b.application_id ?? null}, ${b.source_ticket_id}, ${b.ticket_url ?? null}, ${b.direction}, ${b.sent_at ?? null}, ${b.from ?? null}, ${b.to ?? null}, ${b.subject ?? null},
+                    ${b.text}, ${Array.isArray(b.attachments) ? b.attachments.map(String) : []}, ${b.sender_verified ?? null}, ${b.sent_by ?? null})`;
+          result = { status: 201, data: { stored: 1 } };
         }
       } else if (res0 === "applications" && res1 && res2 === "notes") {
         if (!(await owns("applications", res1))) result = { status: 404, data: { error: "unbekannt" } };
@@ -163,12 +157,9 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ path: string[] 
           else if (b.answer === "zusage") {
             await sql`update mock_moovin.appointments set status = 'bestaetigt' where id = ${res1}`;
             result = { status: 200, data: { status: "bestaetigt" } };
-          } else if (b.answer === "absage") {
+          } else {
             await sql`update mock_moovin.appointments set status = 'abgesagt' where id = ${res1}`;
             result = { status: 200, data: { status: "abgesagt" } };
-          } else {
-            await sql`insert into mock_moovin.reschedule_requests (appointment_id, wish, source_ticket) values (${res1}, ${String(b.comment)}, ${b.source_ticket_id})`;
-            result = { status: 200, data: { status: ap.status, wish_recorded: true } };
           }
         }
       } else result = { status: 404, data: { error: "Route unbekannt" } };
