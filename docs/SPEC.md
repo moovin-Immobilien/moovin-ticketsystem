@@ -29,7 +29,7 @@ Ticketsystem bearbeitet. Claude beantwortet Anliegen auf Basis einer Wissensdate
 |---|---|
 | Architektur | Eigenständiges Ticketsystem mit eigener Oberfläche, moovin per API angebunden |
 | Autonomie | Stufenweise: Start mit Entwürfen + Freigabe durch AM. Je Anliegen (Intent) auf Auto-Antwort schalten, sobald ≥ 90 % der Entwürfe unverändert rausgehen |
-| Schreib-Aktionen | Dokumente ablegen, Termin absagen/verschieben, Interesse/Absage setzen, Notiz am Bewerber |
+| Schreib-Aktionen | Dokumente ablegen, Termin zusagen/absagen, Notiz am Bewerber (Rückzug, Interesse), optional Kopie je Nachricht |
 | Absicherung Schreiben | DKIM/DMARC-Prüfung des Absenders. Fehlgeschlagen → keine Aktion, Ticket an AM |
 | Auskunft | Status + fehlende Unterlagen + nächste Schritte. **Kein** Score, Ranking, Ablehnungsgrund (AGG) |
 | Anhänge | Gar nicht an Claude; ungelesen an moovin |
@@ -41,7 +41,7 @@ Ticketsystem bearbeitet. Claude beantwortet Anliegen auf Basis einer Wissensdate
 | SLA | Menschlich bearbeitete Tickets: Antwort am gleichen Werktag |
 | Stack | Next.js auf Vercel, Postgres (Supabase, Region Frankfurt), Claude API |
 | API-Auth | HMAC-signierte Requests mit Zeitstempel, Schlüssel rotierbar, jeder Aufruf geloggt; keine IP-Allowlist (feste Ausgangs-IPs kosten bei Vercel extra) |
-| Termin verschieben | V1: System bucht nicht selbst um, sondern übermittelt den Verschiebe-Wunsch (+ Absage des alten Slots nur wenn explizit gewünscht) |
+| Termin verschieben | V1: System bucht nicht selbst um; der Verschiebewunsch geht per Mail an den zuständigen AM (kein API-Aufruf, Abstimmung mit Guido 20.11.2026) |
 
 ## 4. Funktionen
 
@@ -76,11 +76,12 @@ Sonst: Entwurf → Freigabe-Queue des zuständigen AM.
 ### 4.5 Aktionen in moovin
 Ausgeführt bei Freigabe durch AM (oder im Auto-Modus). Jede Aktion ist idempotent (`Idempotency-Key` = Ticket-ID + Aktion).
 - Dokumente ablegen → `POST /applicants/{id}/documents` (im Bewerberprofil, gilt für alle Bewerbungen; Anhänge base64, ungelesen)
-- Termin zusagen / absagen / Verschiebewunsch → `POST /appointments/{id}/reply` (`answer` = `zusage` | `absage` | `verschieben`)
+- Termin zusagen / absagen → `POST /appointments/{id}/reply` (`answer` = `zusage` | `absage`)
+- Verschiebewunsch → kein moovin-Aufruf: das Ticketsystem mailt den Wunsch direkt an den zuständigen AM
 - Rückzug, Interesse, sonstige Hinweise → `POST /applications/{id}/notes` (AM setzt den Status in moovin)
 
-Welcher Termin gemeint ist, entscheidet der Server (`src/lib/appointments.ts`): Referenz `[Termin <id>]` im Betreff
-(steht in jeder Einladungs-/Erinnerungsmail), sonst einziger offener Termin, sonst eindeutig erwähntes Datum/Adresse/Inserat.
+Welcher Termin gemeint ist, entscheidet der Server (`src/lib/appointments.ts`): einziger offener Termin, sonst eindeutig
+erwähntes Datum/Uhrzeit, Adresse oder Inserat. (Keine Termin-Kennung in Mails – moovin-Termin-IDs sind intern.)
 Nicht eindeutig → keine Terminaktion, Rückfrage an den Bewerber.
 
 ### 4.6 Oberfläche (AM)
@@ -128,5 +129,4 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 ## 7. Offene Punkte
 - Inbound-Mail-Anbieter final wählen (Vorschlag Postmark, EU-Alternative prüfen) – **kostenpflichtig**.
 - SSO (Google Workspace oder M365?) statt Prototyp-Login.
-- moovin: Termin-Referenz `[Termin <id>]` in den Betreff der Einladungs- und Erinnerungsmails (Zuordnung bei mehreren Bewerbungen).
 - Aufbewahrungsfrist mit Datenschutz abstimmen.

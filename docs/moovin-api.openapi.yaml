@@ -4,12 +4,13 @@ info:
   version: 2.0.0
   description: |
     Schmale, zweckgebundene Schnittstelle zwischen app.moovin.de und dem moovin Ticketsystem.
-    Umsetzung auf moovin-Seite: IT (Guido). Im Prototyp existiert eine Attrappe unter /api/mock-moovin/v1.
+    STATUS: technischer Entwurf des Prototyps (Attrappe unter /api/mock-moovin/v1). Maßgeblich sind die fachlichen
+    Anforderungen im Übergabedokument; Endpunkte, Feldnamen und Sicherheitstechnik entwirft die moovin-IT (Guido).
 
     ## Umfang: fünf Aufrufe
     - Lesen: `GET /applicants`, `GET /listings/{id}`.
     - Schreiben: `POST /appointments/{id}/reply`, `POST /applicants/{id}/documents`, `POST /applications/{id}/notes`.
-    - Optional: `POST /applicants/{id}/correspondence` legt eine Kopie von Bewerber-Mail und Antwort im Bewerber ab.
+    - Optional: `POST /applicants/{id}/correspondence` legt je Aufruf eine Nachricht (Bewerber-Mail oder Antwort) im Bewerber ab.
       Ohne diesen Aufruf (404) läuft alles andere unverändert; im Ticketsystem per `MOOVIN_COPY_CORRESPONDENCE=0` abschaltbar.
 
     ## Sicherheit
@@ -34,10 +35,10 @@ info:
     - Statustexte formuliert das Ticketsystem selbst aus dem `status`-Wert.
 
     ## Mehrere Bewerbungen: welcher Termin ist gemeint?
-    Einladungs- und Erinnerungsmails von moovin enthalten im Betreff die Termin-Referenz `[Termin <appointment.id>]`.
-    Bewerber antworten per „Antworten“, der Betreff bleibt erhalten. Das Ticketsystem ordnet so eindeutig zu.
-    Ohne Referenz: nur ein offener Termin → dieser; sonst nur, wenn Datum, Adresse oder Inserats-Kennung genau eines
+    Es gibt keine Termin-Kennung in Mails (moovin-Termin-IDs sind intern). Das Ticketsystem ordnet zu:
+    nur ein offener Termin → dieser; sonst nur, wenn Datum/Uhrzeit, Adresse oder Inserats-Kennung genau eines
     Termins in der Mail stehen. Andernfalls keine Terminaktion, sondern Rückfrage an den Bewerber.
+    Verschiebewünsche laufen nicht über die API: das Ticketsystem mailt sie direkt dem zuständigen AM.
 servers:
   - url: https://app.moovin.de/api/ticket/v1
     description: Produktion (Vorschlag)
@@ -77,7 +78,7 @@ components:
       additionalProperties: false
       required: [id, starts_at, status]
       properties:
-        id: { type: string, description: "Steht als [Termin <id>] im Betreff der Einladungs-/Erinnerungsmail" }
+        id: { type: string, description: "Interne Kennung; wird nie an Bewerber herausgegeben" }
         starts_at: { type: string, format: date-time, description: ISO 8601 mit Zeitzone }
         ends_at: { type: [string, "null"], format: date-time }
         status: { type: string, enum: [eingeladen, bestaetigt, abgesagt, stattgefunden, no_show] }
@@ -150,11 +151,10 @@ paths:
         "404": { description: Unbekannt oder nicht zum Absender gehörig }
   /appointments/{appointmentId}/reply:
     post:
-      summary: "Antwort des Bewerbers auf eine Einladung: zusagen, absagen oder Verschiebewunsch"
+      summary: "Antwort des Bewerbers auf eine Einladung: zusagen oder absagen"
       description: |
         zusage → Status bestaetigt (bereits bestätigt → 200). absage → Status abgesagt, Platz wird frei.
-        verschieben → Termin bleibt, der Wunsch (comment) landet beim AM als Aufgabe/Notiz.
-        Termin abgesagt, vergangen oder stattgefunden → 409.
+        Termin abgesagt, vergangen oder stattgefunden → 409. (Verschiebewünsche mailt das Ticketsystem direkt an den AM.)
       parameters:
         - $ref: "#/components/parameters/SubjectEmail"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -168,8 +168,8 @@ paths:
               required: [source_ticket_id, answer]
               properties:
                 source_ticket_id: { type: string, example: T-123 }
-                answer: { type: string, enum: [zusage, absage, verschieben] }
-                comment: { type: string, maxLength: 500, description: Pflicht bei verschieben (Wunsch des Bewerbers) }
+                answer: { type: string, enum: [zusage, absage] }
+                comment: { type: string, maxLength: 500 }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: object, properties: { status: { type: string } } } } } }
         "400": { description: Eingabe ungültig }
@@ -208,9 +208,9 @@ paths:
         "404": { description: Unbekannt oder nicht zum Absender gehörig }
   /applicants/{applicantId}/correspondence:
     post:
-      summary: "Optional · Kopie von Bewerber-Mail(s) und Antwort im Bewerber ablegen (Verlauf für AMs in moovin)"
+      summary: "Optional · Kopie einer Nachricht (Bewerber-Mail oder Antwort) im Bewerber ablegen (Verlauf für AMs in moovin)"
       description: |
-        Wird nach jedem Versand aufgerufen und überträgt alle noch nicht kopierten Nachrichten des Tickets.
+        Ein Aufruf je Nachricht. Wird nach jedem Versand für alle noch nicht kopierten Nachrichten des Tickets aufgerufen.
         Anhänge nur als Dateinamen (Dateien gehen über /documents). applicantId muss zur X-Subject-Email gehören, sonst 404.
         sender_verified = false heißt: Absenderadresse technisch nicht bestätigt (bitte in moovin kenntlich machen).
       parameters:
@@ -223,28 +223,20 @@ paths:
           application/json:
             schema:
               type: object
-              required: [source_ticket_id, messages]
+              required: [source_ticket_id, direction, text]
               properties:
                 source_ticket_id: { type: string, example: T-123 }
                 ticket_url: { type: string }
                 application_id: { type: [string, "null"], description: Bewerbung, um die es ging (falls eindeutig) }
-                messages:
-                  type: array
-                  minItems: 1
-                  maxItems: 20
-                  items:
-                    type: object
-                    required: [direction, text]
-                    properties:
-                      direction: { type: string, enum: [in, out] }
-                      sent_at: { type: string, format: date-time }
-                      from: { type: string }
-                      to: { type: string }
-                      subject: { type: string }
-                      text: { type: string, maxLength: 20000 }
-                      attachments: { type: array, items: { type: string }, description: Nur Dateinamen }
-                      sender_verified: { type: boolean, description: Nur bei direction=in }
-                      sent_by: { type: string, description: "Nur bei direction=out: KI oder E-Mail des AM" }
+                direction: { type: string, enum: [in, out] }
+                sent_at: { type: string, format: date-time }
+                from: { type: string }
+                to: { type: string }
+                subject: { type: string }
+                text: { type: string, maxLength: 20000 }
+                attachments: { type: array, items: { type: string }, description: Nur Dateinamen }
+                sender_verified: { type: boolean, description: Nur bei direction=in }
+                sent_by: { type: string, description: "Nur bei direction=out: KI oder E-Mail des AM" }
       responses:
         "201": { description: Abgelegt }
         "400": { description: Eingabe ungültig }
