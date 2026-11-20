@@ -22,6 +22,8 @@ const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", 
 // Interne Weiterleitung (kein Schreibzugriff auf moovin): auch bei unbekanntem oder nicht verifiziertem Absender erlaubt.
 // Das Datenschutzteam prüft die Identität selbst; der Verifizierungsstatus steht in der Weiterleitung.
 const INTERNAL_ACTIONS: ActionType[] = ["datenschutz_weiterleiten"];
+// Aktionen, die nichts in moovin schreiben (nur Mail aus dem Ticketsystem) → kein bestätigter Absender nötig
+const NO_MOOVIN_WRITE: ActionType[] = ["datenschutz_weiterleiten", "termin_verschieben_wunsch"];
 
 function newMessageId(ticketId: number) {
   return `<ticket-${ticketId}-${randomBytes(6).toString("hex")}@tickets.moovin.de>`;
@@ -190,7 +192,7 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
     returning id`;
 
   for (const a of valid) {
-    const blocked = !ticket.sender_verified && !INTERNAL_ACTIONS.includes(a.type);
+    const blocked = !ticket.sender_verified && !NO_MOOVIN_WRITE.includes(a.type);
     const label = actionLabel(a, ctx);
     await sql`insert into ticket.actions (ticket_id, draft_id, type, payload, label, status, blocked_reason, idempotency_key)
       values (${ticketId}, ${draft.id}, ${a.type}, ${sql.json(a as never)}, ${label}, ${blocked ? "blockiert" : "vorgeschlagen"},
@@ -237,7 +239,7 @@ function actionLabel(a: ProposedAction, ctx: ApplicantContext | null): string {
     case "dokumente_ablegen": return `Anhänge im Bewerberprofil ${ctx?.applicant.id ?? ""} ablegen`;
     case "termin_bestaetigen": return `Teilnahme am Termin ${when} bestätigen`;
     case "termin_absagen": return `Termin ${when} absagen und Slot freigeben`;
-    case "termin_verschieben_wunsch": return `Verschiebe-Wunsch für Termin ${when} an AM: „${a.text.slice(0, 120)}“`;
+    case "termin_verschieben_wunsch": return `Verschiebewunsch für Termin ${when} per Mail an den AM: „${a.text.slice(0, 120)}“`;
     case "interesse_setzen": return a.interest === "zurueckgezogen" ? `Rückzug als Notiz an Bewerbung ${a.application_id} (${app?.object_title ?? ""}) – AM zieht in moovin zurück` : `Interesse als Notiz an Bewerbung ${a.application_id} vermerken`;
     case "notiz": return `Notiz: „${a.text.slice(0, 140)}“`;
     case "datenschutz_weiterleiten": return `An ${env.datenschutzAddress()} weiterleiten${a.text ? `: „${a.text.slice(0, 120)}“` : ""}`;
@@ -293,10 +295,10 @@ export async function sendDraft(opts: { ticketId: number; draftId: number; actor
 }
 
 export async function executeAction(actionId: number, actor: string): Promise<{ id: number; ok: boolean; error?: string }> {
-  const [a] = await sql`select a.*, t.sender_email, t.sender_verified, t.applicant_id from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
+  const [a] = await sql`select a.*, t.sender_email, t.sender_verified, t.applicant_id, t.assignee_email from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
   if (!a) return { id: actionId, ok: false, error: "nicht gefunden" };
   if (a.status !== "vorgeschlagen") return { id: actionId, ok: false, error: `Status ${a.status}` };
-  if (!a.sender_verified && !INTERNAL_ACTIONS.includes(a.type)) {
+  if (!a.sender_verified && !NO_MOOVIN_WRITE.includes(a.type)) {
     await sql`update ticket.actions set status = 'blockiert', blocked_reason = 'Absender nicht verifiziert' where id = ${actionId}`;
     return { id: actionId, ok: false, error: "Absender nicht verifiziert" };
   }
@@ -323,9 +325,23 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
       case "termin_absagen":
         result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/reply`, { source_ticket_id: src, answer: "absage", comment: "Absage per Mail" }, a.idempotency_key);
         break;
-      case "termin_verschieben_wunsch":
-        result = await client.post(`/appointments/${encodeURIComponent(p.appointment_id)}/reply`, { source_ticket_id: src, answer: "verschieben", comment: String(p.text || "Verschiebung gewünscht").slice(0, 500) }, a.idempotency_key);
+      case "termin_verschieben_wunsch": {
+        // Kein moovin-Aufruf: das Ticketsystem schreibt dem zuständigen AM direkt eine Mail
+        if (!a.assignee_email) throw new Error("Kein zuständiger AM – Verschiebewunsch bitte manuell weitergeben");
+        const text = [
+          "Verschiebewunsch per Mail aus dem moovin Ticketsystem.",
+          "",
+          `Bewerber: ${a.sender_email}`,
+          String(a.label ?? "").replace(/ per Mail an den AM.*$/, ""),
+          `Wunsch: ${String(p.text || "Verschiebung gewünscht").slice(0, 1000)}`,
+          "",
+          `Ticket: ${env.appUrl()}/tickets/${a.ticket_id}`,
+        ].join("\n");
+        const delivery = await sendMail({ to: a.assignee_email, subject: `[Verschiebewunsch] ${a.sender_email} [#T-${a.ticket_id}]`, text, messageId: newMessageId(Number(a.ticket_id)), ticketId: Number(a.ticket_id) });
+        if (delivery === "fehler") throw new Error(`Mail an ${a.assignee_email} fehlgeschlagen`);
+        result = { notified: a.assignee_email, delivery };
         break;
+      }
       case "interesse_setzen":
         // Kein eigener Endpunkt: als Notiz an die Bewerbung, der AM setzt den Status in moovin
         result = await client.post(`/applications/${encodeURIComponent(p.application_id)}/notes`, {
