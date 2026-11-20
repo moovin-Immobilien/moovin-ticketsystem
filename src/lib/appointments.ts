@@ -1,16 +1,15 @@
 // Welcher Termin ist gemeint? Bewerber können mehrere Bewerbungen mit offenen Terminen haben.
 // Die Zuordnung entscheidet der Server, nicht die KI – in dieser Reihenfolge:
-//   1. Termin-Referenz „[Termin <id>]“ im Betreff/Text (steht in jeder Einladungs- und Erinnerungsmail von moovin)
-//   2. nur ein offener Termin → dieser
-//   3. Datum, Inserats-Kennung oder Adresse genau eines Termins in der Mail (auch im zitierten Original)
-//   sonst: keine Terminaktion, Mensch bzw. Rückfrage.
+//   1. nur ein offener Termin → dieser
+//   2. Datum, Inserats-Kennung oder Adresse genau eines Termins in der Mail (auch im zitierten Original)
+//   sonst: keine Terminaktion, Rückfrage an den Bewerber.
+// (Eine Termin-Kennung im Betreff gibt es bewusst nicht: moovin-Termin-IDs sind intern und gehen nicht nach außen.)
 import type { ApplicantContext, Appointment, Application } from "./moovin/types";
 
 export type ResolvedAppointment =
-  | { id: string; how: "referenz" | "einziger" | "erwaehnt" }
+  | { id: string; how: "einziger" | "erwaehnt" }
   | { id: null; reason: string };
 
-const REF = /\[Termin\s+([A-Za-z0-9_.-]+)\]/gi;
 const STOP = new Set(["zimmer", "wohnung", "apartment", "besichtigung", "treffpunkt", "sammelbesichtigung", "einzelbesichtigung",
   "hauseingang", "eingang", "foyer", "berlin", "hamburg", "potsdam", "münchen", "frankfurt", "köln", "leipzig", "düsseldorf", "straße", "strasse", "allee"]);
 
@@ -35,17 +34,10 @@ export function resolveAppointment(ctx: ApplicantContext | null, mailSubject: st
   const open = openAppointments(ctx, now);
   if (!open.length) return { id: null, reason: "Kein offener Termin gefunden" };
 
-  // 1. Referenz, Betreff zuerst
-  for (const src of [mailSubject, mailText]) {
-    const refs = [...src.matchAll(REF)].map((m) => m[1].toLowerCase());
-    const hit = open.filter((o) => refs.includes(o.appt.id.toLowerCase()));
-    if (hit.length === 1) return { id: hit[0].appt.id, how: "referenz" };
-  }
-
-  // 2. eindeutig
+  // 1. eindeutig
   if (open.length === 1) return { id: open[0].appt.id, how: "einziger" };
 
-  // 3. Datum / Kennung / Adresse, die nur zu einem Termin passt
+  // 2. Datum / Kennung / Adresse, die nur zu einem Termin passt
   const text = `${mailSubject}\n${mailText}`.toLowerCase();
   const tokens = open.map((o) => ({
     id: o.appt.id,

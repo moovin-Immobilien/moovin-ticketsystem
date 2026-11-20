@@ -5,7 +5,7 @@ export type ApplicationStatus =
   | "beim_eigentuemer" | "zusage" | "absage" | "zurueckgezogen";
 
 export type Appointment = {
-  id: string; // steht auch im Betreff der Einladungs-/Erinnerungsmail: „[Termin <id>]“
+  id: string; // interne Kennung, wird nie an Bewerber herausgegeben
   starts_at: string; // ISO 8601 mit Zeitzone
   ends_at?: string | null;
   status: "eingeladen" | "bestaetigt" | "abgesagt" | "stattgefunden" | "no_show";
