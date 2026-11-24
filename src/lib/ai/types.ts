@@ -18,6 +18,8 @@ export type AgentResult = {
   actions: ProposedAction[];
   needs_human: boolean;
   needs_human_reason: string;
+  /** Antwort enthält eine Rückfrage, ohne deren Beantwortung das Anliegen nicht erledigt ist → Ticket „wartet auf Bewerber“ */
+  awaits_reply?: boolean;
 };
 
 export type AgentInput = {

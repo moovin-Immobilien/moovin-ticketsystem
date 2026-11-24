@@ -17,7 +17,6 @@ export function LoginForm({ next }: { next: string }) {
       </div>
       {error && <p className="rounded-lg bg-pink-50 px-3 py-2 text-sm text-pink">{error}</p>}
       <button className="btn-pink h-11 w-full text-[15px]" disabled={pending}>{pending ? "Anmelden …" : "Anmelden"}</button>
-      <p className="pt-2 text-center text-xs text-muted">Zugang nur für das moovin-Team. Anmeldung mit dem moovin-Konto (SSO) folgt.</p>
     </form>
   );
 }

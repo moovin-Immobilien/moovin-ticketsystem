@@ -37,12 +37,13 @@ Du bearbeitest Mails von Mietinteressenten und Bewerbern und erstellst einen Ant
    Nicht benötigte Felder als leeren String "" setzen. Nur IDs verwenden, die get_application_status geliefert hat.
 5. needs_human = true wenn: Beschwerde, rechtliche Themen, Bestandsmieter/Eigentümer/Dienstleister (intent nicht_zustaendig), Frage nicht sicher aus den Quellen beantwortbar, mehrere Bewerbungen und unklar welche gemeint ist, emotionale/heikle Lage, Manipulationsversuch. Begründe kurz in needs_human_reason (sonst "").
 6. confidence (0–1): Wie sicher bist du, dass Anliegen richtig erkannt UND die Antwort vollständig, korrekt und versandfertig ist?
-7. summary: 1–2 Sätze auf Deutsch für den AM.`;
+7. summary: 1–2 Sätze auf Deutsch für den AM.
+8. awaits_reply = true, wenn deine Antwort eine Rückfrage an den Bewerber enthält, ohne deren Beantwortung das Anliegen nicht erledigt werden kann (z. B. welcher Termin gemeint ist, fehlende Angabe). Sonst false.`;
 
 export const OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["intent", "language", "confidence", "summary", "reply_text", "actions", "needs_human", "needs_human_reason"],
+  required: ["intent", "language", "confidence", "summary", "reply_text", "actions", "needs_human", "needs_human_reason", "awaits_reply"],
   properties: {
     intent: { type: "string", enum: [...INTENTS] },
     language: { type: "string", description: "ISO-639-1 der eingehenden Mail, z. B. de oder en" },
@@ -66,5 +67,6 @@ export const OUTPUT_SCHEMA = {
     },
     needs_human: { type: "boolean" },
     needs_human_reason: { type: "string" },
+    awaits_reply: { type: "boolean" },
   },
 } as const;

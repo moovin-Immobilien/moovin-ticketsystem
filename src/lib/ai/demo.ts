@@ -42,6 +42,15 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
   let needs = false;
   let reason = "";
   let conf = 0.8;
+  let awaits = false;
+  // Mehrere offene Termine, nicht eindeutig → Rückfrage statt Terminaktion
+  const ambiguous = !res.id && "reason" in res && res.reason.startsWith("Mehrere");
+  const askWhich = () => {
+    const list = (ctx?.applications ?? []).filter((x) => x.appointment && ["eingeladen", "bestaetigt"].includes(x.appointment.status) && new Date(x.appointment.starts_at) > new Date())
+      .map((x) => `- ${fmt(x.appointment!.starts_at)}: ${x.object_title}`).join("\n");
+    awaits = true; conf = 0.75;
+    return `vielen Dank für Ihre Nachricht. Sie haben derzeit mehrere Besichtigungstermine:\n${list}\n\nBitte teilen Sie uns kurz mit, welchen Termin Sie meinen.`;
+  };
 
   if (!ctx && !["spam", "nicht_zustaendig", "beschwerde", "wohnungssuche_allgemein", "konto_datenschutz", "technik_login"].includes(intent)) {
     body = "vielen Dank für Ihre Nachricht. Leider können wir Ihre Mailadresse keiner Bewerbung zuordnen. Bitte schreiben Sie uns von der Adresse, mit der Sie sich beworben haben, oder nennen Sie uns Objekt und Namen, unter dem die Bewerbung erfolgt ist.";
@@ -58,14 +67,17 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
       conf = Math.min(conf, 0.88); break;
     case "termin_absage":
       if (appt) { body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihren Besichtigungstermin am ${fmt(appt.starts_at)} storniert und den Platz freigegeben.`; act({ type: "termin_absagen", appointment_id: appt.id }); conf = 0.9; }
+      else if (ambiguous) body = askWhich();
       else { body = "vielen Dank für Ihre Nachricht. Wir konnten keinen offenen Termin finden. [AM: bitte prüfen]"; needs = true; reason = "Kein offener Termin gefunden"; conf = 0.4; }
       break;
     case "termin_bestaetigen":
       if (appt) { body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihre Teilnahme am Besichtigungstermin am ${fmt(appt.starts_at)} bestätigt. Treffpunkt: ${appt.meeting_point}. Bitte bringen Sie einen Lichtbildausweis mit.`; act({ type: "termin_bestaetigen", appointment_id: appt.id }); conf = 0.9; }
+      else if (ambiguous) body = askWhich();
       else { body = "vielen Dank für Ihre Rückmeldung. [AM: kein offener Termin gefunden]"; needs = true; reason = "Kein offener Termin gefunden"; conf = 0.4; }
       break;
     case "termin_verschieben":
       if (appt) { body = `vielen Dank für Ihre Nachricht. Wir haben Ihren Wunsch, den Termin am ${fmt(appt.starts_at)} zu verschieben, an Ihren Ansprechpartner weitergegeben. Er meldet sich mit möglichen Alternativen. Bitte beachten Sie, dass Ersatztermine bei Sammelbesichtigungen nur begrenzt möglich sind.`; act({ type: "termin_verschieben_wunsch", appointment_id: appt.id, text: i.newMessage.slice(0, 300) }); conf = 0.8; }
+      else if (ambiguous) body = askWhich();
       else { body = "vielen Dank für Ihre Nachricht. [AM: kein Termin gefunden]"; needs = true; reason = "Kein Termin gefunden"; conf = 0.4; }
       break;
     case "besichtigung_frage":
@@ -115,6 +127,7 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
     actions,
     needs_human: needs,
     needs_human_reason: reason,
+    awaits_reply: awaits,
   };
   return { result, model: "demo-regeln", usage: null, toolCalls: [] };
 }
