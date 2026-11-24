@@ -12,11 +12,12 @@ import { searchKnowledge } from "./knowledge";
 import { runClaudeAgent } from "./ai/claude";
 import { runDemoAgent } from "./ai/demo";
 import type { AgentInput, AgentOutput, ProposedAction } from "./ai/types";
-import { sendMail } from "./mailer";
+import { sendMail, sendMailDetailed } from "./mailer";
 import { similarity, UNCHANGED_THRESHOLD } from "./similarity";
 import { INTENTS, type ActionType } from "./intents";
 import { resolveAppointment } from "./appointments";
 import { copyCorrespondence } from "./correspondence";
+import { effectiveAssignee, taskForAction, addNote } from "./workflow";
 
 const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz", "datenschutz_weiterleiten"];
 // Interne Weiterleitung (kein Schreibzugriff auf moovin): auch bei unbekanntem oder nicht verifiziertem Absender erlaubt.
@@ -38,7 +39,7 @@ function trustedAuthServ(): string[] {
 
 // ---------- Eingang ----------
 
-export async function processInbound(mail: InboundMail, actor = "webhook"): Promise<{ ticketId: number; duplicate: boolean }> {
+export async function processInbound(mail: InboundMail, actor = "webhook", warnings: string[] = []): Promise<{ ticketId: number; duplicate: boolean }> {
   if (!mail.fromEmail || !mail.fromEmail.includes("@")) throw new Error("Absender fehlt");
 
   if (mail.messageId) {
@@ -49,17 +50,26 @@ export async function processInbound(mail: InboundMail, actor = "webhook"): Prom
   const verification = isSenderVerified(mail.authResults, mail.fromEmail, trustedAuthServ());
   const now = new Date();
 
-  // Threading: 1) eigene Message-ID in In-Reply-To/References, 2) [#T-123] im Betreff, 3) offenes Ticket desselben Absenders < 14 Tage
+  // Threading: 1) eigene/vom Versanddienst vergebene Message-ID in In-Reply-To/References, 2) [#T-123] im Betreff,
+  // 3) offenes Ticket desselben Absenders < 14 Tage. Geschlossene Tickets werden über 1) und 2) wieder geöffnet.
   let ticketId: number | null = null;
-  const refMatch = `${mail.inReplyTo ?? ""} ${mail.references ?? ""}`.match(/ticket-(\d+)-[0-9a-f]+@tickets\.moovin\.de/);
+  const refs = `${mail.inReplyTo ?? ""} ${mail.references ?? ""}`;
+  const refMatch = refs.match(/ticket-(\d+)-[0-9a-f]+@tickets\.moovin\.de/);
+  const refIds = (refs.match(/<[^<>\s]+>/g) ?? []).slice(-20);
+  let byProvider: string | undefined;
+  if (refIds.length) {
+    const r = await sql`select ticket_id from ticket.messages where direction = 'out' and (mail_message_id = any(${refIds}) or provider_message_id = any(${refIds}))
+                        order by created_at desc limit 1`;
+    byProvider = r[0]?.ticket_id ? String(r[0].ticket_id) : undefined;
+  }
   const subjMatch = mail.subject.match(/\[#T-(\d+)\]/);
-  for (const cand of [refMatch?.[1], subjMatch?.[1]]) {
+  for (const cand of [refMatch?.[1], byProvider, subjMatch?.[1]]) {
     if (!cand) continue;
-    const t = await sql`select id from ticket.tickets where id = ${Number(cand)} and sender_email = ${mail.fromEmail}`;
-    if (t.length) { ticketId = Number(t[0].id); break; }
+    const t = await sql`select id, merged_into from ticket.tickets where id = ${Number(cand)} and sender_email = ${mail.fromEmail}`;
+    if (t.length) { ticketId = Number(t[0].merged_into ?? t[0].id); break; }
   }
   if (!ticketId) {
-    const t = await sql`select id from ticket.tickets where sender_email = ${mail.fromEmail} and status <> 'geschlossen'
+    const t = await sql`select id from ticket.tickets where sender_email = ${mail.fromEmail} and status <> 'geschlossen' and merged_into is null
                         and created_at > now() - interval '14 days' order by created_at desc limit 1`;
     if (t.length) ticketId = Number(t[0].id);
   }
@@ -69,9 +79,17 @@ export async function processInbound(mail: InboundMail, actor = "webhook"): Prom
       values (${mail.fromEmail}, ${mail.fromName || null}, ${mail.subject || null}, ${verification.verified}, ${dueDate(now)}, ${now}) returning id`;
     ticketId = Number(t.id);
   } else {
+    const [prev] = await sql`select status from ticket.tickets where id = ${ticketId}`;
     await sql`update ticket.tickets set status = 'neu', sender_verified = ${verification.verified}, last_inbound_at = ${now},
               due_at = case when status in ('beantwortet','geschlossen','wartet') then ${dueDate(now)} else due_at end,
-              closed_at = null, updated_at = now() where id = ${ticketId}`;
+              reopened_at = case when status = 'geschlossen' then ${now} else reopened_at end,
+              waiting_since = null, waiting_reminded_at = null, closed_at = null, updated_at = now() where id = ${ticketId}`;
+    if (prev?.status === "geschlossen") {
+      await audit(actor, "ticket", { event: "wiedereroeffnet" }, ticketId);
+      await addNote(ticketId, "system", "Neue Mail des Bewerbers – Ticket wurde wieder geöffnet.", "system");
+    } else if (prev?.status === "wartet") {
+      await audit(actor, "ticket", { event: "antwort_auf_rueckfrage" }, ticketId);
+    }
   }
 
   const [msg] = await sql`insert into ticket.messages (ticket_id, direction, from_email, from_name, to_email, subject, body_text,
@@ -85,13 +103,13 @@ export async function processInbound(mail: InboundMail, actor = "webhook"): Prom
   }
   await audit(actor, "mail_in", { from: mail.fromEmail, attachments: mail.attachments.length, verified: verification.verified, detail: verification.detail }, ticketId);
 
-  await analyzeTicket(ticketId);
+  await analyzeTicket(ticketId, "system", warnings);
   return { ticketId, duplicate: false };
 }
 
 // ---------- KI-Analyse ----------
 
-export async function analyzeTicket(ticketId: number, actor = "system") {
+export async function analyzeTicket(ticketId: number, actor = "system", warnings: string[] = []) {
   const [ticket] = await sql`select * from ticket.tickets where id = ${ticketId}`;
   if (!ticket) throw new Error("Ticket nicht gefunden");
   const msgs = await sql`select * from ticket.messages where ticket_id = ${ticketId} order by created_at asc`;
@@ -147,6 +165,13 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
   if (!INTENTS.includes(r.intent)) r.intent = "sonstiges";
   r.confidence = Math.max(0, Math.min(1, Number(r.confidence) || 0));
   if (moovinError) { r.needs_human = true; r.needs_human_reason = `moovin nicht erreichbar: ${moovinError}`; }
+  if (warnings.length) {
+    r.needs_human = true;
+    r.needs_human_reason = [r.needs_human_reason, ...warnings].filter(Boolean).join("; ").slice(0, 500);
+    for (const w of warnings) await addNote(ticketId, "system", w, "system");
+  }
+  // Rückfrage an den Bewerber? (Fallback, falls das Modell das Feld nicht liefert: Fragezeichen im Antworttext nach der Anrede)
+  if (typeof r.awaits_reply !== "boolean") r.awaits_reply = /\?\s*$/m.test(r.reply_text.split("\n").slice(1).join("\n"));
 
   // Aktionen serverseitig prüfen: nur IDs aus dem Kontext dieses Absenders, keine Duplikate.
   const appIds = new Set((ctx?.applications ?? []).map((a) => a.id));
@@ -204,10 +229,13 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
   // Objekt/Bewerbung für Anzeige: aus Aktion, sonst erste Bewerbung
   const focusApp = ctx?.applications.find((a) => valid.some((v) => v.application_id === a.id || v.appointment_id === a.appointment?.id)) ?? ctx?.applications[0];
 
-  // Zuständiger AM kommt direkt aus der Bewerbung (kein eigener API-Aufruf)
-  let assignee: string | null = null;
-  const amEmail = focusApp?.account_manager_email?.toLowerCase();
-  if (amEmail) assignee = (await sql`select email from ticket.agents where email = ${amEmail} and active`)[0]?.email ?? null;
+  // Zuständiger AM kommt direkt aus der Bewerbung (kein eigener API-Aufruf); abwesend → Vertretung bzw. Allgemeiner Eingang
+  const amEmail = focusApp?.account_manager_email?.toLowerCase() ?? null;
+  const known = amEmail ? (await sql`select email from ticket.agents where email = ${amEmail} and active`)[0]?.email ?? null : null;
+  // Bestehende Zuständigkeit bleibt; ist der AM abwesend, übernimmt die Vertretung bzw. der Allgemeine Eingang
+  const eff = await effectiveAssignee(ticket.assignee_email ?? known);
+  const assignee = eff.assignee;
+  const deputyFor = eff.assignee === ticket.assignee_email && ticket.assignee_email ? ticket.deputy_for : eff.deputyFor;
 
   const [setting] = await sql`select * from ticket.intent_settings where intent = ${r.intent}`;
   const auto =
@@ -220,7 +248,8 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
       needs_human = ${r.needs_human}, needs_human_reason = ${r.needs_human_reason || null},
       applicant_id = ${ctx?.applicant.id ?? null}, applicant_known = ${!!ctx}, reply_to_email = ${ctx ? ticket.sender_email : null},
       application_id = ${focusApp?.id ?? null}, object_id = ${focusApp?.listing_id ?? listingId}, object_title = ${focusApp?.object_title ?? objectTitle},
-      assignee_email = coalesce(assignee_email, ${assignee}),
+      deputy_for = ${deputyFor},
+      assignee_email = ${assignee},
       status = 'entwurf', updated_at = now()
     where id = ${ticketId}`;
 
@@ -228,7 +257,12 @@ export async function analyzeTicket(ticketId: number, actor = "system") {
 
   if (auto) {
     const acts = await sql`select id from ticket.actions where draft_id = ${draft.id} and status = 'vorgeschlagen'`;
-    await sendDraft({ ticketId, draftId: Number(draft.id), actor: "ki", finalText: r.reply_text, actionIds: acts.map((a) => Number(a.id)) });
+    try {
+      await sendDraft({ ticketId, draftId: Number(draft.id), actor: "ki", finalText: r.reply_text, actionIds: acts.map((a) => Number(a.id)), awaitReply: !!r.awaits_reply });
+    } catch (e) {
+      await sql`update ticket.tickets set needs_human = true, needs_human_reason = ${`Auto-Versand fehlgeschlagen: ${(e as Error).message}`.slice(0, 300)}, auto_handled = false where id = ${ticketId}`;
+      await audit("ki", "ticket", { event: "auto_versand_fehler", error: (e as Error).message }, ticketId);
+    }
   }
 }
 
@@ -248,14 +282,23 @@ function actionLabel(a: ProposedAction, ctx: ApplicantContext | null): string {
 
 // ---------- Versand & Aktionen ----------
 
-export async function sendDraft(opts: { ticketId: number; draftId: number; actor: string; finalText: string; actionIds: number[] }) {
+export class SendConflict extends Error {}
+
+export async function sendDraft(opts: { ticketId: number; draftId: number; actor: string; finalText: string; actionIds: number[]; awaitReply?: boolean; knownLastMessageId?: number | null; force?: boolean }) {
   const { ticketId, draftId, actor, finalText, actionIds } = opts;
   const [ticket] = await sql`select * from ticket.tickets where id = ${ticketId}`;
   const [draft] = await sql`select * from ticket.drafts where id = ${draftId} and ticket_id = ${ticketId}`;
   if (!ticket || !draft) throw new Error("Ticket/Entwurf nicht gefunden");
+  // Bearbeitungssperre: hat jemand anderes geantwortet, seit der AM das Ticket geöffnet hat?
+  if (opts.knownLastMessageId !== undefined && !opts.force) {
+    const [newer] = await sql`select m.sent_by, m.created_at from ticket.messages m where m.ticket_id = ${ticketId} and m.direction = 'out'
+                              and m.id > ${opts.knownLastMessageId ?? 0} order by m.id desc limit 1`;
+    if (newer) throw new SendConflict(`${String(newer.sent_by).replace("am:", "")} hat zwischenzeitlich geantwortet. Trotzdem senden?`);
+  }
   if (draft.status !== "offen") throw new Error("Entwurf wurde bereits bearbeitet");
   if (!finalText.trim()) throw new Error("Antwort ist leer");
   if (/\[AM:/.test(finalText)) throw new Error("Antwort enthält noch [AM: …]-Platzhalter");
+  if (ticket.merged_into) throw new Error(`Ticket wurde in T-${ticket.merged_into} zusammengeführt`);
 
   // Empfänger: IMMER die in moovin hinterlegte Adresse; unbekannte Absender bekommen nur generische Antworten an ihre Absenderadresse
   const to = ticket.reply_to_email ?? ticket.sender_email;
@@ -265,10 +308,11 @@ export async function sendDraft(opts: { ticketId: number; draftId: number; actor
   const messageId = newMessageId(ticketId);
   const references = [lastIn?.references_hdr, lastIn?.mail_message_id].filter(Boolean).join(" ") || null;
 
-  const delivery = await sendMail({ to, subject, text: finalText, inReplyTo: lastIn?.mail_message_id ?? null, references, messageId, ticketId });
+  const { delivery, providerMessageId } = await sendMailDetailed({ to, subject, text: finalText, inReplyTo: lastIn?.mail_message_id ?? null, references, messageId, ticketId });
+  if (delivery === "fehler") throw new Error("Versand fehlgeschlagen – bitte erneut versuchen");
 
-  await sql`insert into ticket.messages (ticket_id, direction, from_email, to_email, subject, body_text, mail_message_id, in_reply_to, references_hdr, sent_by, delivery_status)
-    values (${ticketId}, 'out', ${env.inboundAddress()}, ${to}, ${subject}, ${finalText}, ${messageId}, ${lastIn?.mail_message_id ?? null}, ${references}, ${actor}, ${delivery})`;
+  await sql`insert into ticket.messages (ticket_id, direction, from_email, to_email, subject, body_text, mail_message_id, provider_message_id, in_reply_to, references_hdr, sent_by, delivery_status)
+    values (${ticketId}, 'out', ${env.inboundAddress()}, ${to}, ${subject}, ${finalText}, ${messageId}, ${providerMessageId}, ${lastIn?.mail_message_id ?? null}, ${references}, ${actor}, ${delivery})`;
 
   const sim = similarity(draft.body_text, finalText);
   await sql`update ticket.drafts set status = 'gesendet', final_text = ${finalText}, similarity = ${sim}, unchanged = ${sim >= UNCHANGED_THRESHOLD},
@@ -286,11 +330,13 @@ export async function sendDraft(opts: { ticketId: number; draftId: number; actor
     results.push(await executeAction(Number(a.id), actor));
   }
 
-  await sql`update ticket.tickets set status = 'beantwortet', auto_handled = ${actor === "ki"},
+  const wait = !!opts.awaitReply;
+  await sql`update ticket.tickets set status = ${wait ? "wartet" : "beantwortet"}, auto_handled = ${actor === "ki"},
+            waiting_since = ${wait ? new Date() : null}, waiting_reminded_at = null, due_at = case when ${wait} then null else due_at end,
             first_response_at = coalesce(first_response_at, now()), updated_at = now() where id = ${ticketId}`;
   // Option: Kopie von Mail und Antwort im Bewerber in moovin (blockiert den Versand nie)
   const copy = await copyCorrespondence(ticketId);
-  await audit(actor, "ticket", { event: "beantwortet", draftId, delivery, similarity: sim, actions: results, copy }, ticketId);
+  await audit(actor, "ticket", { event: wait ? "rueckfrage_gesendet" : "beantwortet", draftId, delivery, similarity: sim, actions: results, copy }, ticketId);
   return { delivery, results };
 }
 
@@ -378,6 +424,7 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
     }
     await sql`update ticket.actions set status = 'ausgefuehrt', result = ${sql.json((result ?? {}) as never)}, executed_by = ${actor}, executed_at = now() where id = ${actionId}`;
     await audit(actor, "action", { type: a.type, ok: true }, Number(a.ticket_id));
+    await taskForAction({ id: actionId, ticket_id: Number(a.ticket_id), type: a.type, payload: p, label: a.label, assignee_email: a.assignee_email });
     return { id: actionId, ok: true };
   } catch (e) {
     const msg = (e as Error).message;
