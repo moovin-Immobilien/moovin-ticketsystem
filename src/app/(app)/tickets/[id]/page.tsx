@@ -6,7 +6,9 @@ import { MoovinClient } from "@/lib/moovin/client";
 import type { ApplicantContext } from "@/lib/moovin/types";
 import { StatusBadge, IntentBadge, ConfidenceBar, fmtLong, VerifiedBadge } from "@/components/ui";
 import { DraftPanel } from "./DraftPanel";
-import { takeOverAction, assignAction } from "./actions";
+import { Presence } from "./Presence";
+import { takeOverAction, assignAction, addNoteAction, handoverAction, mergeAction, reviewedAction, taskDoneAction } from "./actions";
+import { knownObjects } from "@/lib/objects";
 
 export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
   const agent = await requireAgent();
@@ -21,13 +23,20 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
   const [draft] = await sql`select * from ticket.drafts where ticket_id = ${ticketId} order by created_at desc limit 1`;
   const actions = draft ? await sql`select * from ticket.actions where draft_id = ${draft.id} order by id` : [];
   const agents = await sql`select email, name from ticket.agents where active order by name`;
+  const notes = await sql`select n.*, a.name as author_name, g.name as target_name from ticket.notes n left join ticket.agents a on a.email = n.author_email
+                          left join ticket.agents g on g.email = n.target_email where n.ticket_id = ${ticketId} order by n.created_at`;
+  const tasks = await sql`select k.*, a.name as assignee_name from ticket.tasks k left join ticket.agents a on a.email = k.assignee_email where k.ticket_id = ${ticketId} order by k.status, k.created_at`;
+  const siblings = await sql`select id, subject, status, created_at from ticket.tickets where sender_email = ${t.sender_email} and id <> ${ticketId} and merged_into is null order by created_at desc limit 10`;
+  const objects = await knownObjects();
+  const lastOutId = messages.filter((m) => m.direction === "out").reduce((mx, m) => Math.max(mx, Number(m.id)), 0) || null;
+  const deputyForName = t.deputy_for ? (agents.find((a) => a.email === t.deputy_for)?.name ?? t.deputy_for) : null;
 
   let ctx: ApplicantContext | null = null;
   let ctxError: string | null = null;
   try { ctx = await new MoovinClient(t.sender_email, ticketId).getApplicantContext(); } catch (e) { ctxError = (e as Error).message; }
 
-  const analysis = (draft?.analysis ?? {}) as { summary?: string; needs_human_reason?: string; toolCalls?: string[]; aiError?: string };
-  const isOpen = !["beantwortet", "geschlossen"].includes(t.status);
+  const analysis = (draft?.analysis ?? {}) as { summary?: string; needs_human_reason?: string; toolCalls?: string[]; aiError?: string; awaits_reply?: boolean };
+  const isOpen = !["beantwortet", "geschlossen", "wartet"].includes(t.status);
   const draftEditable = !!draft && draft.status === "offen" && isOpen;
 
   return (
@@ -41,26 +50,39 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
             <IntentBadge intent={t.intent} />
             <VerifiedBadge verified={t.sender_verified} />
             {t.auto_handled && <span className="badge bg-emerald-50 text-emerald-700">automatisch beantwortet</span>}
-            <span className="text-muted">Eingang {fmtLong(t.created_at)} · fällig {fmtLong(t.due_at)}</span>
+            {t.auto_handled && (t.reviewed_at
+              ? <span className="badge bg-emerald-50 text-emerald-700">gegengelesen</span>
+              : <form action={reviewedAction.bind(null, ticketId)}><button className="badge bg-white border border-line text-navy hover:bg-canvas">Als gegengelesen markieren</button></form>)}
+            {t.status === "wartet" && <span className="badge bg-slate-100 text-slate-600">wartet seit {fmtLong(t.waiting_since)}</span>}
+            {t.reopened_at && <span className="badge bg-amber-50 text-amber-700">wiedereröffnet {fmtLong(t.reopened_at)}</span>}
+            <span className="text-muted">Eingang {fmtLong(t.created_at)}{t.due_at ? ` · fällig ${fmtLong(t.due_at)}` : ""}</span>
           </div>
         </div>
-        <div className="flex items-center gap-2 text-sm">
-          <span className="text-muted">AM:</span>
-          <span className="font-medium whitespace-nowrap">{t.assignee_name ?? "Pool"}</span>
-          {t.assignee_email !== agent.email && (
-            <form action={takeOverAction.bind(null, ticketId)}><button className="btn-ghost">Übernehmen</button></form>
-          )}
-          {agent.role === "admin" && (
-            <form action={async (fd: FormData) => { "use server"; await assignAction(ticketId, String(fd.get("to") ?? "")); }} className="flex gap-1">
-              <select name="to" defaultValue={t.assignee_email ?? ""} className="input w-44">
-                <option value="">Pool</option>
-                {agents.map((a) => <option key={a.email} value={a.email}>{a.name}</option>)}
-              </select>
-              <button className="btn-ghost">Zuweisen</button>
-            </form>
-          )}
+        <div className="flex flex-col items-end gap-2 text-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-muted">AM:</span>
+            <span className="font-medium whitespace-nowrap" data-testid="assignee">{t.assignee_name ?? "Allgemeiner Eingang"}</span>
+            {deputyForName && <span className="badge bg-slate-100 text-slate-600">Vertretung für {deputyForName}</span>}
+            {t.assignee_email !== agent.email && (
+              <form action={takeOverAction.bind(null, ticketId)}><button className="btn-ghost">Übernehmen</button></form>
+            )}
+          </div>
+          <form action={assignAction.bind(null, ticketId)} className="flex gap-1" data-testid="assign-form">
+            <input name="object" list="objects" placeholder={t.object_id ? `${t.object_id} · ${t.object_title ?? ""}` : "Objekt zuordnen"} className="input w-56" />
+            <datalist id="objects">{objects.map((o) => <option key={o.object_id} value={`${o.object_id} · ${o.object_title ?? ""}`} />)}</datalist>
+            <select name="to" defaultValue="" className="input w-44">
+              <option value="">{t.assignee_email ? "AM unverändert" : "AM (aus Objekt)"}</option>
+              {agents.map((a) => <option key={a.email} value={a.email}>{a.name}</option>)}
+            </select>
+            <button className="btn-ghost">Zuordnen</button>
+          </form>
         </div>
       </div>
+
+      <Presence ticketId={ticketId} lastOutId={lastOutId} />
+      {t.merged_into && (
+        <p className="rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-700">Zusammengeführt in <Link className="underline" href={`/tickets/${t.merged_into}`}>T-{t.merged_into}</Link>.</p>
+      )}
 
       <div className="grid lg:grid-cols-[1fr_380px] gap-5">
         <div className="space-y-5">
@@ -81,10 +103,10 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
             {isOpen ? (
               <DraftPanel key={draft?.id ?? 0} ticketId={ticketId} draftId={draft?.id ? Number(draft.id) : null} draftText={draft?.body_text ?? ""}
                 actions={actions.map((a) => ({ id: Number(a.id), label: a.label, status: a.status, blocked_reason: a.blocked_reason, type: a.type }))}
-                recipient={t.reply_to_email ?? t.sender_email} editable={draftEditable} />
+                recipient={t.reply_to_email ?? t.sender_email} editable={draftEditable && !t.merged_into} awaitsReply={!!analysis.awaits_reply} lastOutId={lastOutId} />
             ) : (
               <div className="space-y-3">
-                <p className="text-sm text-muted">Ticket ist {t.status}. Neue Mails des Absenders öffnen es automatisch wieder.</p>
+                <p className="text-sm text-muted">{t.status === "wartet" ? "Ticket wartet auf die Antwort des Bewerbers. Seine Antwort holt es automatisch zurück." : `Ticket ist ${t.status}. Neue Mails des Absenders öffnen es automatisch wieder.`}</p>
                 {actions.length > 0 && (
                   <ul className="text-sm space-y-1">
                     {actions.map((a) => (
@@ -92,7 +114,7 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
                     ))}
                   </ul>
                 )}
-                <DraftPanel ticketId={ticketId} draftId={null} draftText="" actions={[]} recipient="" editable={false} />
+                {!t.merged_into && <DraftPanel ticketId={ticketId} draftId={null} draftText="" actions={[]} recipient="" editable={false} />}
               </div>
             )}
           </section>
@@ -124,6 +146,64 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
 
         {/* Kontext aus moovin */}
         <aside className="space-y-4">
+          <section className="card p-4 space-y-3" data-testid="notes">
+            <h2 className="font-semibold text-navy">Intern <span className="text-xs font-normal text-muted">– nie an Bewerber, moovin oder KI</span></h2>
+            {notes.length === 0 && <p className="text-xs text-muted">Noch keine internen Notizen.</p>}
+            <ul className="space-y-2">
+              {notes.map((n) => (
+                <li key={n.id} className={`rounded-lg px-3 py-2 text-sm ${n.kind === "system" ? "bg-canvas text-muted" : n.kind === "weitergabe" ? "bg-blue-50 text-blue-900" : "bg-amber-50 text-amber-900"}`}>
+                  <div className="text-xs opacity-70 mb-0.5">
+                    {n.kind === "system" ? "System" : n.author_name ?? n.author_email}{n.kind === "weitergabe" ? ` → ${n.target_name ?? n.target_email}` : ""} · {fmtLong(n.created_at)}
+                  </div>
+                  <div className="whitespace-pre-wrap">{n.text}</div>
+                </li>
+              ))}
+            </ul>
+            <form action={addNoteAction.bind(null, ticketId)} className="space-y-2">
+              <textarea name="text" required placeholder="Interne Notiz …" className="input min-h-16 text-sm" />
+              <button className="btn-ghost">Notiz speichern</button>
+            </form>
+            <form action={handoverAction.bind(null, ticketId)} className="space-y-2 border-t border-line pt-3" data-testid="handover-form">
+              <div className="label">Weitergeben an</div>
+              <select name="to" required defaultValue="" className="input">
+                <option value="" disabled>Kollegin/Kollege wählen</option>
+                {agents.filter((a) => a.email !== agent.email).map((a) => <option key={a.email} value={a.email}>{a.name}</option>)}
+              </select>
+              <textarea name="text" placeholder="Kommentar für die Kollegin/den Kollegen" className="input min-h-14 text-sm" />
+              <button className="btn-ghost">Weitergeben</button>
+            </form>
+          </section>
+
+          {tasks.length > 0 && (
+            <section className="card p-4 space-y-2" data-testid="ticket-tasks">
+              <h2 className="font-semibold text-navy">Aufgaben in moovin</h2>
+              {tasks.map((k) => (
+                <div key={k.id} className="flex items-start gap-2 text-sm">
+                  <form action={taskDoneAction.bind(null, Number(k.id), k.status !== "erledigt")}>
+                    <button title={k.status === "erledigt" ? "Wieder öffnen" : "Abhaken"} className={`mt-0.5 h-4 w-4 rounded border ${k.status === "erledigt" ? "bg-emerald-500 border-emerald-500" : "border-line bg-white"}`} />
+                  </form>
+                  <div className={k.status === "erledigt" ? "line-through text-muted" : ""}>{k.text}<div className="text-xs text-muted">{k.assignee_name ?? "Allgemeiner Eingang"}</div></div>
+                </div>
+              ))}
+            </section>
+          )}
+
+          {siblings.length > 0 && !t.merged_into && (
+            <section className="card p-4 space-y-2" data-testid="merge">
+              <h2 className="font-semibold text-navy">Weitere Tickets dieses Absenders</h2>
+              <ul className="text-sm space-y-1">
+                {siblings.map((x) => <li key={x.id}><Link className="text-navy underline" href={`/tickets/${x.id}`}>T-{x.id}</Link> · {x.subject || "(ohne Betreff)"} · <span className="text-muted">{x.status}</span></li>)}
+              </ul>
+              <form action={mergeAction.bind(null, ticketId)} className="flex gap-2">
+                <select name="into" className="input" defaultValue={String(siblings[0].id)}>
+                  {siblings.map((x) => <option key={x.id} value={String(x.id)}>T-{x.id}</option>)}
+                </select>
+                <button className="btn-ghost whitespace-nowrap">Hierhin zusammenführen</button>
+              </form>
+              <p className="text-xs text-muted">Dieses Ticket (T-{ticketId}) wird in das gewählte überführt; der Verlauf bleibt vollständig.</p>
+            </section>
+          )}
+
           <section className="card p-4">
             <h2 className="font-semibold text-navy mb-3">Bewerber (live aus moovin)</h2>
             {ctxError && <p className="text-sm text-pink">moovin nicht erreichbar: {ctxError}</p>}
