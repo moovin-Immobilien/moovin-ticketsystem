@@ -1,6 +1,6 @@
 # moovin Ticketsystem – Anforderungen (SPEC)
 
-Stand: 19.11.2026 · Owner: Fabian Mellin · Umsetzung Prototyp: Fabian + Claude · Anbindung moovin: Guido (IT)
+Stand: 24.11.2026 · Owner: Fabian Mellin · Umsetzung Prototyp: Fabian + Claude · Anbindung moovin: Guido (IT)
 
 ## 1. Ziel
 
@@ -33,11 +33,11 @@ Ticketsystem bearbeitet. Claude beantwortet Anliegen auf Basis einer Wissensdate
 | Absicherung Schreiben | DKIM/DMARC-Prüfung des Absenders. Fehlgeschlagen → keine Aktion, Ticket an AM |
 | Auskunft | Status + fehlende Unterlagen + nächste Schritte. **Kein** Score, Ranking, Ablehnungsgrund (AGG) |
 | Anhänge | Gar nicht an Claude; ungelesen an moovin |
-| Mail-Eingang | Neue Inbound-Adresse/MX → Inbound-Mail-Dienst → Webhook. Zoho Desk fällt weg |
-| AM-Zugriff | Eigene Oberfläche, Login mit moovin-Konto (Ziel: Google/M365-SSO), AM sieht seine Objekte; Link aus moovin zum Ticket |
+| Mail-Eingang/-Versand | Brevo (Inbound Parsing + Transaktionsmails); Postmark-Adapter bleibt, umschaltbar per `MAIL_PROVIDER`. Zoho Desk fällt weg |
+| AM-Zugriff | Eigene Oberfläche, nur Google-Login (Workspace-Domain moovin.de, Scopes openid/email/profile). Unbekannte moovin-Adressen erst nach Freischaltung durch Admin |
 | Wissen | Objektinfos automatisch per API aus moovin, AM ergänzt/prüft. Allgemeine FAQ pflegt Ops zentral |
 | Ton | „Sie“, Antwort in der Sprache der eingehenden Mail |
-| Zuteilung | AM des Objekts; Vertretung durch Team, sobald überfällig |
+| Zuteilung | AM des Objekts; ohne AM → Allgemeiner Eingang. Abwesenheit mit Vertretung (ohne Vertretung → Allgemeiner Eingang). Überfällige sieht das Team |
 | SLA | Menschlich bearbeitete Tickets: Antwort am gleichen Werktag |
 | Stack | Next.js auf Vercel, Postgres (Supabase, Region Frankfurt), Claude API |
 | API-Auth | HMAC-signierte Requests mit Zeitstempel, Schlüssel rotierbar, jeder Aufruf geloggt; keine IP-Allowlist (feste Ausgangs-IPs kosten bei Vercel extra) |
@@ -46,10 +46,13 @@ Ticketsystem bearbeitet. Claude beantwortet Anliegen auf Basis einer Wissensdate
 ## 4. Funktionen
 
 ### 4.1 Eingang & Threading
-- Webhook `POST /api/inbound/email` (Format: Postmark Inbound JSON; anderer Anbieter = Adapter tauschen).
-- Webhook ist per geheimem Token gesichert. Rohdaten werden nicht geloggt.
-- Zuordnung zu bestehendem Ticket: (1) `In-Reply-To`/`References` enthält unsere Message-ID, (2) Betreff enthält `[#T-123]`,
-  (3) offenes Ticket desselben Absenders < 14 Tage. Sonst neues Ticket.
+- Webhook `POST /api/inbound/email`. Format nach `MAIL_PROVIDER`: `brevo` (Standard, Inbound Parsing `{items:[…]}`) oder `postmark`.
+  Brevo-Anhänge werden über den DownloadToken per API geladen; schlägt das fehl → Hinweis am Ticket, Mensch nötig.
+- Webhook ist per geheimem Token gesichert (`?token=`, Basic oder Bearer). Rohdaten werden nicht geloggt.
+- Zuordnung zu bestehendem Ticket: (1) `In-Reply-To`/`References` enthält unsere oder die vom Versanddienst vergebene Message-ID,
+  (2) Betreff enthält `[#T-123]`, (3) offenes Ticket desselben Absenders < 14 Tage. Sonst neues Ticket.
+- Antwort auf ein geschlossenes Ticket (über 1 oder 2) öffnet es wieder (Notiz + Audit). Zusammengeführte Tickets leiten weiter.
+- Versand: Brevo vergibt die Message-ID selbst (Standard-Header nicht setzbar) → wird gespeichert; Reply-To = mieter@.
 - Absenderprüfung: `Authentication-Results` → `dkim=pass` mit Domain-Alignment **oder** `dmarc=pass` ⇒ `verifiziert`.
 
 ### 4.2 KI-Verarbeitung (Claude)
@@ -85,9 +88,25 @@ erwähntes Datum/Uhrzeit, Adresse oder Inserat. (Keine Termin-Kennung in Mails �
 Nicht eindeutig → keine Terminaktion, Rückfrage an den Bewerber.
 
 ### 4.6 Oberfläche (AM)
-- **Tickets:** Filter Meine / Pool / Überfällig / Alle; Status, Anliegen, Absender, Objekt, Eingang, Fälligkeit.
+- **Login:** nur Google (Workspace moovin.de, `hd`-Prüfung, PKCE, Nonce). Erstanmeldung unbekannter Adresse → Antrag, Admin schaltet unter **Team** frei.
+- **Mein Bereich** (Startseite), vier Reiter mit Zähler:
+  - *Zu erledigen:* Entwürfe zur Freigabe und Handantworten, Überfällige oben.
+  - *Offene Aufgaben:* Tabelle `tasks`; automatisch bei Verschiebewunsch, Rückzug, Interesse und jeder Notiz-Aktion; Abhaken im Ticketsystem.
+  - *Wartet auf Bewerber:* Tickets mit Rückfrage (Häkchen beim Senden, von der KI vorbelegt). Antwort des Bewerbers holt sie zurück.
+    Nach 7 Tagen ohne Antwort: Aufgabe „nachfassen“ für den AM (täglicher Cron), keine Mail an den Bewerber.
+  - *Automatisch erledigt:* Auto-Antworten, Filter nach Anliegen, „gegengelesen“ markieren, Auto-Quote (30 Tage) oben.
+- **Allgemeiner Eingang:** alles ohne zuständigen AM (unbekannter Absender, ohne Objekt, nicht zuständig, AM abwesend ohne Vertretung).
+  Zuordnung per Klick zu Objekt und/oder AM; ohne AM-Auswahl übernimmt der AM, der das Objekt zuletzt betreut hat. Audit-Log.
+- **Alle Tickets:** Filter Offen / Meine / Allgemeiner Eingang / Wartet / Überfällig / Erledigt.
 - **Ticket-Detail:** Verlauf, Bewerber-Kontext live aus moovin, KI-Analyse, editierbarer Entwurf, Aktionen (an/aus),
-  „Freigeben & senden“, „Neu generieren“, „Ohne Antwort schließen“, Übernehmen.
+  „Freigeben & senden“, „Neu generieren“, „Ohne Antwort schließen“, Übernehmen, Zuordnen.
+  - Interne Notizen (nie an Bewerber, moovin oder KI) und Weitergabe an Kollegen mit Kommentar.
+  - Bearbeitungssperre: Anzeige, wer das Ticket gerade offen hat; Warnung vor dem Senden, wenn inzwischen jemand geantwortet hat.
+  - Zusammenführen zweier Tickets desselben Absenders; Verlauf bleibt vollständig.
+- **Abwesenheit:** Zeitraum + Vertretung (AM selbst, Admin für alle). Neue und offene Tickets/Aufgaben gehen an die Vertretung,
+  ohne Vertretung in den Allgemeinen Eingang. Danach bleiben sie bei der Vertretung; Tickets aus dem Allgemeinen Eingang gehen zurück an den AM.
+- **Suche** über alle Tickets (Name, Mailadresse, Objekt, Ticket-Nr.) mit denselben Sichtrechten.
+- **Dashboard (Admin):** Tickets pro Tag/Woche, erste Antwortzeit (Median/90 %), Auto-Quote je Anliegen, offene/überfällige Tickets, offene Aufgaben je AM.
 - **Wissen:** FAQ (global) und Ergänzungen je Objekt; Objektdaten aus moovin read-only daneben.
 - **Autonomie (Admin):** je Intent Anzahl, Quote „unverändert übernommen“, Modus Entwurf/Auto, Schwelle.
 - **Simulieren:** Testmail einspielen (für Prototyp und Tests).
@@ -95,7 +114,8 @@ Nicht eindeutig → keine Terminaktion, Rückfrage an den Bewerber.
 - Deep-Link aus moovin: `/tickets?email=<adresse>` und `/tickets/<id>`.
 
 ### 4.7 Zuteilung & SLA
-- Zuständig: AM des Objekts (aus moovin). Unbekannt → Pool.
+- Zuständig: AM des Objekts (aus moovin). Unbekannt → Allgemeiner Eingang. Abwesend → Vertretung bzw. Allgemeiner Eingang.
+- Tickets „wartet auf Bewerber“ haben keine Fälligkeit; die Antwort des Bewerbers setzt sie neu.
 - Fälligkeit: Eingang an Werktag vor 16:00 → 18:00 desselben Tages; sonst nächster Werktag 12:00 (Europe/Berlin).
 - Überfällige Tickets sieht das ganze Team.
 
@@ -114,7 +134,8 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 - Hosting EU (Vercel Region `fra1`, Postgres Frankfurt). AVV mit Anthropic, Zero-Data-Retention anfragen.
 - Datenminimierung: Claude sieht nur den Ausschnitt zum Absender; keine Anhänge, kein Score.
 - Secrets nur als Umgebungsvariablen, nie im Code/Chat.
-- Rollen: `am`, `admin`. AM sieht eigene Tickets, Pool und Überfällige.
+- Rollen: `am`, `admin`. AM sieht eigene Tickets, Allgemeinen Eingang und Überfällige (auch in der Suche).
+- Keine proaktiven Mails an Bewerber, keine Massen-Freigabe; Eingriffe in moovin nur über die fünf API-Aufrufe.
 - Audit-Log unveränderlich (insert-only).
 - Löschkonzept: geschlossene Tickets + Anhänge nach 6 Monaten löschen (analog Bewerberdaten), konfigurierbar.
 - Prompt-Injection: Mailinhalt ist Daten, nicht Anweisung. Werkzeuge sind an den Absender gebunden; Aktionen erst nach
@@ -127,6 +148,8 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 4. Pilot mit 1–2 AMs, danach Umstellung mieter@ und Abschaltung Zoho Desk
 
 ## 7. Offene Punkte
-- Inbound-Mail-Anbieter final wählen (Vorschlag Postmark, EU-Alternative prüfen) – **kostenpflichtig**.
-- SSO (Google Workspace oder M365?) statt Prototyp-Login.
+- Google-OAuth-Client (Google Cloud, Workspace moovin.de) anlegen: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` setzen.
+  Bis dahin gilt übergangsweise das Prototyp-Passwort; mit Google-Zugangsdaten ist es automatisch abgeschaltet.
+- Brevo einrichten (Tarif klären): Empfangs-Subdomain (z. B. reply.moovin.de, MX auf Brevo), Weiterleitung mieter@ → Subdomain,
+  Inbound-Webhook auf `/api/inbound/email?token=…`, `BREVO_API_KEY`, Absenderdomain moovin.de verifizieren, `TRUSTED_AUTHSERV_IDS` prüfen.
 - Aufbewahrungsfrist mit Datenschutz abstimmen.
