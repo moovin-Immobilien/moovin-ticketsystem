@@ -1,0 +1,162 @@
+import "server-only";
+import { sql } from "./db";
+import { audit } from "./audit";
+import { dueDate } from "./sla";
+
+/** Heutiges Datum in Berlin (YYYY-MM-DD). */
+export function berlinToday(d = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Berlin", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+}
+
+type AgentRow = { email: string; active: boolean; absent_from: string | null; absent_until: string | null; deputy_email: string | null };
+
+function isAbsent(a: AgentRow, today: string) {
+  return !!a.absent_from && !!a.absent_until && a.absent_from <= today && today <= a.absent_until;
+}
+
+/**
+ * Wer bearbeitet Tickets dieses AM gerade? Abwesend → Vertretung (aktiv und selbst anwesend), sonst Allgemeiner Eingang (null).
+ * deputyFor = vertretener AM (für die Anzeige „Vertretung für …“).
+ */
+export async function effectiveAssignee(email: string | null): Promise<{ assignee: string | null; deputyFor: string | null }> {
+  if (!email) return { assignee: null, deputyFor: null };
+  const rows = await sql<AgentRow[]>`select email, active, absent_from::text, absent_until::text, deputy_email from ticket.agents where active`;
+  const by = new Map(rows.map((r) => [r.email, r]));
+  const today = berlinToday();
+  const am = by.get(email);
+  if (!am) return { assignee: null, deputyFor: null };
+  if (!isAbsent(am, today)) return { assignee: email, deputyFor: null };
+  const dep = am.deputy_email ? by.get(am.deputy_email) : undefined;
+  if (dep && !isAbsent(dep, today)) return { assignee: dep.email, deputyFor: email };
+  return { assignee: null, deputyFor: email };
+}
+
+// ---------- Aufgaben ----------
+
+export type TaskType = "verschiebewunsch" | "rueckzug" | "interesse" | "notiz" | "nachfassen" | "manuell";
+
+export async function createTask(t: { ticketId: number; type: TaskType; text: string; assignee: string | null; actionId?: number | null; createdBy?: string; due?: Date }) {
+  const [row] = await sql`insert into ticket.tasks (ticket_id, action_id, assignee_email, type, text, due_at, created_by)
+    values (${t.ticketId}, ${t.actionId ?? null}, ${t.assignee}, ${t.type}, ${t.text.slice(0, 1000)}, ${t.due ?? dueDate(new Date())}, ${t.createdBy ?? "system"})
+    on conflict (action_id) do nothing returning id`;
+  if (row) await audit(t.createdBy ?? "system", "ticket", { event: "aufgabe_angelegt", type: t.type, task: Number(row.id) }, t.ticketId);
+  return row ? Number(row.id) : null;
+}
+
+/** Nach erfolgreicher Aktion: Aufgabe für den AM, wenn er in moovin etwas tun muss. */
+export async function taskForAction(a: { id: number; ticket_id: number; type: string; payload: { interest?: string; text?: string }; label: string | null; assignee_email: string | null }) {
+  let type: TaskType | null = null;
+  let text = "";
+  if (a.type === "termin_verschieben_wunsch") { type = "verschiebewunsch"; text = `Neuen Termin anbieten: ${a.label ?? ""}`; }
+  else if (a.type === "interesse_setzen" && a.payload.interest === "zurueckgezogen") { type = "rueckzug"; text = "Bewerbung in moovin zurückziehen (Bewerber hat per Mail zurückgezogen)"; }
+  else if (a.type === "interesse_setzen") { type = "interesse"; text = "Interesse des Bewerbers in moovin vermerken"; }
+  else if (a.type === "notiz") { type = "notiz"; text = `Notiz in moovin prüfen: ${String(a.payload.text ?? "").slice(0, 300)}`; }
+  if (!type) return null;
+  return createTask({ ticketId: a.ticket_id, type, text, assignee: a.assignee_email, actionId: a.id });
+}
+
+export async function setTaskDone(taskId: number, actor: string, done: boolean) {
+  const [t] = await sql`update ticket.tasks set status = ${done ? "erledigt" : "offen"}, done_by = ${done ? actor : null}, done_at = ${done ? new Date() : null}
+                        where id = ${taskId} returning ticket_id`;
+  if (t) await audit(actor, "ticket", { event: done ? "aufgabe_erledigt" : "aufgabe_wieder_offen", task: taskId }, Number(t.ticket_id));
+}
+
+// ---------- Interne Notizen ----------
+
+export async function addNote(ticketId: number, author: string, text: string, kind: "notiz" | "weitergabe" | "system" = "notiz", target: string | null = null) {
+  await sql`insert into ticket.notes (ticket_id, author_email, kind, target_email, text) values (${ticketId}, ${author}, ${kind}, ${target}, ${text.slice(0, 4000)})`;
+}
+
+// ---------- Zusammenführen ----------
+
+/** Führt source in target zusammen (gleicher Absender). Nachrichten, Notizen, Aufgaben wandern mit; source wird geschlossen. */
+export async function mergeTickets(sourceId: number, targetId: number, actor: string) {
+  if (sourceId === targetId) throw new Error("Gleiches Ticket");
+  const [s] = await sql`select id, sender_email, merged_into from ticket.tickets where id = ${sourceId}`;
+  const [t] = await sql`select id, sender_email, merged_into from ticket.tickets where id = ${targetId}`;
+  if (!s || !t) throw new Error("Ticket nicht gefunden");
+  if (s.merged_into || t.merged_into) throw new Error("Ticket wurde bereits zusammengeführt");
+  if (s.sender_email !== t.sender_email) throw new Error("Nur Tickets desselben Absenders");
+  await sql.begin(async (tx) => {
+    await tx`update ticket.messages set ticket_id = ${targetId} where ticket_id = ${sourceId}`;
+    await tx`update ticket.notes set ticket_id = ${targetId} where ticket_id = ${sourceId}`;
+    await tx`update ticket.tasks set ticket_id = ${targetId} where ticket_id = ${sourceId}`;
+    await tx`update ticket.drafts set status = 'verworfen', decided_by = ${actor}, decided_at = now() where ticket_id = ${sourceId} and status = 'offen'`;
+    await tx`update ticket.actions set status = 'verworfen' where ticket_id = ${sourceId} and status in ('vorgeschlagen','blockiert')`;
+    await tx`update ticket.tickets set status = 'geschlossen', closed_at = now(), merged_into = ${targetId}, updated_at = now() where id = ${sourceId}`;
+    await tx`update ticket.tickets set last_inbound_at = greatest(last_inbound_at, (select max(created_at) from ticket.messages where ticket_id = ${targetId} and direction = 'in')),
+             updated_at = now() where id = ${targetId}`;
+    await tx`insert into ticket.notes (ticket_id, author_email, kind, text) values (${targetId}, ${actor.replace(/^am:/, "")}, 'system', ${`T-${sourceId} wurde in dieses Ticket zusammengeführt.`})`;
+  });
+  await audit(actor, "ticket", { event: "zusammengefuehrt", from: sourceId, into: targetId }, targetId);
+  await audit(actor, "ticket", { event: "zusammengefuehrt", from: sourceId, into: targetId }, sourceId);
+}
+
+// ---------- Bearbeitungssperre (Anzeige) ----------
+
+export async function touchPresence(ticketId: number, email: string) {
+  await sql`insert into ticket.presence (ticket_id, agent_email, seen_at) values (${ticketId}, ${email}, now())
+            on conflict (ticket_id, agent_email) do update set seen_at = now()`;
+}
+
+export async function othersViewing(ticketId: number, email: string): Promise<{ email: string; name: string }[]> {
+  return sql<{ email: string; name: string }[]>`select p.agent_email as email, a.name from ticket.presence p join ticket.agents a on a.email = p.agent_email
+    where p.ticket_id = ${ticketId} and p.agent_email <> ${email} and p.seen_at > now() - interval '60 seconds' order by a.name`;
+}
+
+export async function leavePresence(ticketId: number, email: string) {
+  await sql`delete from ticket.presence where ticket_id = ${ticketId} and agent_email = ${email}`;
+}
+
+// ---------- Tägliche Pflege (Vercel Cron, zusätzlich beim Öffnen von „Mein Bereich“) ----------
+
+export const WAIT_DAYS = 7;
+
+export async function housekeeping(actor = "system") {
+  // 1. Wartet seit 7 Tagen ohne Antwort → Hinweis-Aufgabe an den AM (keine Mail an den Bewerber)
+  const stale = await sql`update ticket.tickets set waiting_reminded_at = now()
+    where status = 'wartet' and waiting_reminded_at is null and waiting_since < now() - make_interval(days => ${WAIT_DAYS})
+    returning id, assignee_email`;
+  for (const t of stale) {
+    await createTask({ ticketId: Number(t.id), type: "nachfassen", assignee: t.assignee_email, createdBy: actor,
+      text: `Seit ${WAIT_DAYS} Tagen keine Antwort des Bewerbers auf die Rückfrage – nachfassen (Antwort im Ticket) oder Ticket schließen.` });
+  }
+
+  // 2. Abwesenheit: offene Tickets und Aufgaben abwesender AMs → Vertretung bzw. Allgemeiner Eingang
+  const today = berlinToday();
+  const absent = await sql`select email from ticket.agents where active and absent_from <= ${today}::date and absent_until >= ${today}::date`;
+  let moved = 0;
+  for (const a of absent) {
+    const { assignee, deputyFor } = await effectiveAssignee(a.email);
+    const tickets = await sql`update ticket.tickets set assignee_email = ${assignee}, deputy_for = ${deputyFor}, updated_at = now()
+      where assignee_email = ${a.email} and status not in ('beantwortet','geschlossen') returning id`;
+    await sql`update ticket.tasks set assignee_email = ${assignee} where assignee_email = ${a.email} and status = 'offen'`;
+    for (const t of tickets) {
+      await audit(actor, "ticket", { event: "vertretung", from: a.email, to: assignee ?? "Allgemeiner Eingang" }, Number(t.id));
+      moved++;
+    }
+  }
+
+  // 3. Abwesenheit vorbei: Tickets, die mangels Vertretung im Allgemeinen Eingang lagen, gehen zurück an den AM
+  const back = await sql`update ticket.tickets t set assignee_email = t.deputy_for, deputy_for = null, updated_at = now()
+    from ticket.agents a
+    where a.email = t.deputy_for and a.active and t.assignee_email is null and t.status not in ('beantwortet','geschlossen')
+      and not (coalesce(a.absent_from <= ${today}::date and a.absent_until >= ${today}::date, false))
+    returning t.id, t.assignee_email`;
+  for (const t of back) await audit(actor, "ticket", { event: "zurueck_nach_abwesenheit", to: t.assignee_email }, Number(t.id));
+
+  // 4. Aufräumen
+  await sql`delete from ticket.presence where seen_at < now() - interval '1 hour'`;
+  await sql`delete from ticket.oauth_states where created_at < now() - interval '1 hour'`;
+  await sql`delete from ticket.sessions where expires_at < now()`;
+  return { reminders: stale.length, moved, back: back.length };
+}
+
+// Pflege beim Öffnen von „Mein Bereich“: höchstens alle 10 Minuten je Instanz (sonst täglich per Cron)
+const hk = globalThis as unknown as { __hk?: number };
+export async function maybeHousekeeping() {
+  const now = Date.now();
+  if (hk.__hk && now - hk.__hk < 10 * 60_000) return;
+  hk.__hk = now;
+  await housekeeping("system").catch((e) => console.error("housekeeping", e));
+}

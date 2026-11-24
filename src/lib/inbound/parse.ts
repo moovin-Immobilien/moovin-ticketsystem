@@ -1,5 +1,6 @@
-// Normalisiert eingehende Mails. Adapter für Postmark Inbound (JSON). Anderer Anbieter → neuen Adapter schreiben.
-export type InboundAttachment = { filename: string; contentType: string; contentBase64: string; size: number };
+// Normalisiert eingehende Mails. Adapter für Brevo Inbound Parsing und Postmark Inbound (beide JSON).
+// Brevo liefert Anhänge nicht im Webhook, sondern als DownloadToken → werden danach per API geladen (lib/inbound/brevo.ts).
+export type InboundAttachment = { filename: string; contentType: string; contentBase64: string; size: number; downloadToken?: string };
 export type InboundMail = {
   fromEmail: string;
   fromName: string;
@@ -54,6 +55,53 @@ export function parsePostmark(p: PostmarkInbound): InboundMail {
     authResults: header(p.Headers, "Authentication-Results") ?? header(p.Headers, "ARC-Authentication-Results"),
     attachments: (p.Attachments ?? []).map((a) => ({ filename: a.Name, contentType: a.ContentType, contentBase64: a.Content, size: a.ContentLength })),
   };
+}
+
+// ---------- Brevo ----------
+type BrevoMailbox = { Address?: string; Name?: string | null };
+type BrevoItem = {
+  MessageId?: string;
+  InReplyTo?: string | null;
+  From?: BrevoMailbox;
+  To?: BrevoMailbox[];
+  Recipients?: BrevoMailbox[];
+  Subject?: string;
+  RawTextBody?: string | null;
+  RawHtmlBody?: string | null;
+  ExtractedMarkdownMessage?: string | null;
+  Headers?: Record<string, string | string[]>;
+  Attachments?: { Name: string; ContentType: string; ContentLength: number; ContentID?: string; DownloadToken: string }[];
+};
+
+function brevoHeader(h: Record<string, string | string[]> | undefined, name: string): string | null {
+  if (!h) return null;
+  const key = Object.keys(h).find((k) => k.toLowerCase() === name.toLowerCase());
+  if (!key) return null;
+  const v = h[key];
+  return Array.isArray(v) ? v.join("\n") : v;
+}
+
+const angle = (id: string | null | undefined) => (id ? (id.trim().startsWith("<") ? id.trim() : `<${id.trim()}>`) : null);
+
+export function parseBrevo(payload: { items?: BrevoItem[] }): InboundMail[] {
+  return (payload.items ?? []).map((p) => {
+    const text = (p.RawTextBody && p.RawTextBody.trim()) || (p.RawHtmlBody ? htmlToText(p.RawHtmlBody) : "") || (p.ExtractedMarkdownMessage ?? "");
+    const inbound = (p.Recipients?.[0]?.Address ?? p.To?.[0]?.Address ?? "").toLowerCase();
+    return {
+      fromEmail: (p.From?.Address ?? "").trim().toLowerCase(),
+      fromName: (p.From?.Name ?? "").trim(),
+      to: inbound,
+      subject: (p.Subject ?? "").trim(),
+      text: text.slice(0, 50_000),
+      messageId: angle(brevoHeader(p.Headers, "Message-ID") ?? p.MessageId),
+      inReplyTo: brevoHeader(p.Headers, "In-Reply-To") ?? angle(p.InReplyTo),
+      references: brevoHeader(p.Headers, "References"),
+      authResults: brevoHeader(p.Headers, "Authentication-Results") ?? brevoHeader(p.Headers, "ARC-Authentication-Results"),
+      // Inline-Bilder (ContentID, z. B. Signatur-Logos) sind keine Unterlagen
+      attachments: (p.Attachments ?? []).filter((a) => !a.ContentID || !/^image\//i.test(a.ContentType))
+        .map((a) => ({ filename: a.Name, contentType: a.ContentType, contentBase64: "", size: a.ContentLength, downloadToken: a.DownloadToken })),
+    };
+  });
 }
 
 /** Entfernt zitierte Vorgänger-Mails grob, damit Claude nur die neue Nachricht sieht (Verlauf kommt separat). */

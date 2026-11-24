@@ -27,12 +27,26 @@ export const env = {
   datenschutzAddress: () => process.env.DATENSCHUTZ_ADDRESS ?? "datenschutz@moovin.de",
   // Option: Kopie von Mail und Antwort im Bewerber in moovin ablegen (POST /applicants/{id}/correspondence); "0" schaltet ab
   copyCorrespondence: () => (process.env.MOOVIN_COPY_CORRESPONDENCE ?? "1") === "1",
-  // Ausgang
+  // Mail-Dienst für Eingang (Webhook-Format) und Versand: "brevo" (Standard) oder "postmark"
+  mailProvider: (): "brevo" | "postmark" => (process.env.MAIL_PROVIDER === "postmark" ? "postmark" : "brevo"),
+  brevoApiKey: () => process.env.BREVO_API_KEY ?? "",
+  // Nur Tests (nicht in Produktion): Brevo-API auf einen lokalen Testserver umbiegen
+  brevoApiBase: () => (process.env.NODE_ENV !== "production" && process.env.BREVO_API_TEST_BASE) || "https://api.brevo.com",
   postmarkToken: () => process.env.POSTMARK_SERVER_TOKEN ?? "",
   fromAddress: () => process.env.MAIL_FROM ?? "moovin Vermietung <mieter@moovin.de>",
-  // Prototyp-Login
-  prototypePassword: () => req("PROTOTYPE_PASSWORD"),
+  // Login: Google Workspace (nur openid, email, profile)
+  googleClientId: () => process.env.GOOGLE_CLIENT_ID ?? "",
+  googleClientSecret: () => process.env.GOOGLE_CLIENT_SECRET ?? "",
+  // Nur Tests (nicht in Produktion): Google-Endpunkte auf einen lokalen Testserver umbiegen
+  googleOauthBase: () => (process.env.NODE_ENV !== "production" && process.env.GOOGLE_OAUTH_TEST_BASE) || "",
   allowedDomain: () => process.env.LOGIN_DOMAIN ?? "moovin.de",
+  // Übergang: Prototyp-Passwort gilt nur, solange Google nicht eingerichtet ist
+  prototypePassword: () => process.env.PROTOTYPE_PASSWORD ?? "",
+  // Vercel Cron (Authorization: Bearer <CRON_SECRET>)
+  cronSecret: () => process.env.CRON_SECRET ?? "",
 };
+
+export const googleLoginEnabled = () => !!env.googleClientId() && !!env.googleClientSecret();
+export const passwordLoginEnabled = () => !googleLoginEnabled() && !!env.prototypePassword();
 
 export const demoMode = () => !env.anthropicKey();
