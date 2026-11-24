@@ -4,11 +4,20 @@ import { sendAction, regenerateAction, closeAction } from "./actions";
 
 type Action = { id: number; label: string; status: string; blocked_reason: string | null; type: string };
 
-export function DraftPanel(props: { ticketId: number; draftId: number | null; draftText: string; actions: Action[]; recipient: string; editable: boolean }) {
+export function DraftPanel(props: { ticketId: number; draftId: number | null; draftText: string; actions: Action[]; recipient: string; editable: boolean; awaitsReply?: boolean; lastOutId?: number | null }) {
   const [text, setText] = useState(props.draftText);
   const [selected, setSelected] = useState<number[]>(props.actions.filter((a) => a.status === "vorgeschlagen").map((a) => a.id));
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [awaitReply, setAwaitReply] = useState(!!props.awaitsReply);
   const [pending, start] = useTransition();
+  const send = (force: boolean) => start(async () => {
+    const r = await sendAction(props.ticketId, props.draftId!, text, selected, { awaitReply, knownLastMessageId: props.lastOutId ?? null, force });
+    if (r.conflict) {
+      if (confirm(r.message)) send(true); else setMsg({ ok: false, text: "Nicht gesendet – bitte Verlauf prüfen (Seite neu laden)." });
+      return;
+    }
+    setMsg({ ok: r.ok, text: r.message + (r.ok && r.failed?.length ? ` Fehler: ${r.failed.map((f) => f.error).join("; ")}` : "") });
+  });
   const hasPlaceholder = /\[AM:/.test(text);
 
   if (!props.editable || !props.draftId) {
@@ -47,14 +56,16 @@ export function DraftPanel(props: { ticketId: number; draftId: number | null; dr
         </div>
       )}
 
+      <label className="flex items-center gap-2 text-sm text-ink">
+        <input type="checkbox" name="awaitReply" className="accent-navy" checked={awaitReply} onChange={(e) => setAwaitReply(e.target.checked)} />
+        Rückfrage an den Bewerber – Ticket wartet auf seine Antwort
+      </label>
+
       {msg && <div className={`rounded-lg px-3 py-2 text-sm ${msg.ok ? "bg-emerald-50 text-emerald-800" : "bg-pink-50 text-pink"}`}>{msg.text}</div>}
 
       <div className="flex flex-wrap gap-2">
         <button className="btn-pink" disabled={pending || hasPlaceholder || !text.trim()}
-          onClick={() => start(async () => {
-            const r = await sendAction(props.ticketId, props.draftId!, text, selected);
-            setMsg({ ok: r.ok, text: r.message + (r.ok && r.failed?.length ? ` Fehler: ${r.failed.map((f) => f.error).join("; ")}` : "") });
-          })}>
+          onClick={() => send(false)}>
           {pending ? "Bitte warten …" : "Freigeben & senden"}
         </button>
         <button className="btn-ghost" disabled={pending} onClick={() => start(async () => { await regenerateAction(props.ticketId); setMsg(null); })}>Neu generieren</button>

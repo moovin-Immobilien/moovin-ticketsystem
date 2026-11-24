@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { sql } from "@/lib/db";
-import { requireAgent } from "@/lib/auth";
+import { requireAgent, visibleSql } from "@/lib/auth";
 import { StatusBadge, IntentBadge, ConfidenceBar, fmtDateTime } from "@/components/ui";
 
 const VIEWS = [
   { key: "offen", label: "Offen" },
   { key: "meine", label: "Meine" },
-  { key: "pool", label: "Pool" },
+  { key: "pool", label: "Allgemeiner Eingang" },
+  { key: "wartet", label: "Wartet auf Bewerber" },
   { key: "ueberfaellig", label: "Überfällig" },
   { key: "erledigt", label: "Erledigt" },
 ] as const;
@@ -16,15 +17,15 @@ export default async function TicketsPage(props: PageProps<"/tickets">) {
   const sp = await props.searchParams;
   const view = (typeof sp.view === "string" ? sp.view : "offen") as (typeof VIEWS)[number]["key"];
   const email = typeof sp.email === "string" ? sp.email.toLowerCase().trim() : "";
-  const isAdmin = agent.role === "admin";
-  const open = sql`t.status not in ('beantwortet','geschlossen')`;
+  const open = sql`t.status not in ('beantwortet','geschlossen','wartet') and t.merged_into is null`;
 
   // Sichtbarkeit: Admin alles; AM eigene + Pool + überfällige
-  const visible = isAdmin ? sql`true` : sql`(t.assignee_email = ${agent.email} or t.assignee_email is null or (t.due_at < now() and t.status not in ('beantwortet','geschlossen')))`;
+  const visible = visibleSql(agent);
   const filter =
     view === "meine" ? sql`t.assignee_email = ${agent.email} and ${open}` :
     view === "pool" ? sql`t.assignee_email is null and ${open}` :
     view === "ueberfaellig" ? sql`t.due_at < now() and ${open}` :
+    view === "wartet" ? sql`t.status = 'wartet'` :
     view === "erledigt" ? sql`t.status in ('beantwortet','geschlossen')` : open;
   const byEmail = email ? sql`and t.sender_email = ${email}` : sql``;
 
@@ -102,8 +103,8 @@ export default async function TicketsPage(props: PageProps<"/tickets">) {
                   <td className="px-4 py-3 text-muted max-w-[14rem] truncate">{t.object_title ?? (t.applicant_known ? "–" : <span className="text-amber-700">unbekannter Absender</span>)}</td>
                   <td className="px-4 py-3"><StatusBadge status={t.status} />{t.auto_handled && <div className="text-xs text-emerald-700 mt-1">automatisch</div>}</td>
                   <td className="px-4 py-3 whitespace-nowrap"><ConfidenceBar value={t.confidence} /></td>
-                  <td className={`px-4 py-3 tabular-nums whitespace-nowrap ${overdue ? "text-pink font-semibold" : "text-muted"}`}>{["beantwortet", "geschlossen"].includes(t.status) ? "–" : fmtDateTime(t.due_at)}</td>
-                  <td className="px-4 py-3 text-muted whitespace-nowrap">{t.assignee_name ?? <span className="badge bg-slate-100 text-slate-600">Pool</span>}</td>
+                  <td className={`px-4 py-3 tabular-nums whitespace-nowrap ${overdue ? "text-pink font-semibold" : "text-muted"}`}>{["beantwortet", "geschlossen", "wartet"].includes(t.status) || !t.due_at ? "–" : fmtDateTime(t.due_at)}</td>
+                  <td className="px-4 py-3 text-muted whitespace-nowrap">{t.assignee_name ?? <span className="badge bg-slate-100 text-slate-600">Allg. Eingang</span>}</td>
                 </tr>
               );
             })}

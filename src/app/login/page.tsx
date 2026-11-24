@@ -1,4 +1,5 @@
 import { LoginForm } from "./LoginForm";
+import { googleLoginEnabled, passwordLoginEnabled } from "@/lib/env";
 
 const FEATURES = [
   { title: "Antwortentwürfe in Sekunden", text: "Claude liest jede Bewerber-Mail und schlägt eine fertige Antwort vor." },
@@ -8,7 +9,10 @@ const FEATURES = [
 
 export default async function LoginPage(props: PageProps<"/login">) {
   const sp = await props.searchParams;
-  const next = typeof sp.next === "string" ? sp.next : "/tickets";
+  const next = typeof sp.next === "string" ? sp.next : "/mein";
+  const error = typeof sp.error === "string" ? sp.error : "";
+  const pending = sp.pending === "1";
+  const google = googleLoginEnabled();
   return (
     <main className="flex-1 grid lg:grid-cols-[1.1fr_1fr] min-h-screen">
       {/* Markenseite */}
@@ -55,8 +59,24 @@ export default async function LoginPage(props: PageProps<"/login">) {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/moovin-logo.svg" alt="moovin" className="h-10 mb-10" />
           <h2 className="text-2xl font-semibold tracking-tight text-navy">Willkommen zurück</h2>
-          <p className="mt-1 mb-8 text-sm text-muted">Melde dich mit deiner moovin-Adresse an.</p>
-          <LoginForm next={next} />
+          <p className="mt-1 mb-8 text-sm text-muted">Melde dich mit deinem moovin-Google-Konto an.</p>
+          {error && (
+            <p className={`mb-5 rounded-lg px-3 py-2 text-sm ${pending ? "bg-amber-50 text-amber-800" : "bg-pink-50 text-pink"}`}>{error}</p>
+          )}
+          {google ? (
+            <a href={`/api/auth/google?next=${encodeURIComponent(next)}`} className="btn-pink h-11 w-full text-[15px] flex items-center justify-center gap-3">
+              <svg viewBox="0 0 48 48" className="h-5 w-5 rounded-full bg-white p-0.5" aria-hidden><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.5l6.7-6.7C35.6 2.4 30.2 0 24 0 14.6 0 6.6 5.4 2.6 13.3l7.8 6C12.3 13.6 17.6 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4.1 7.1-10.1 7.1-17.5z"/><path fill="#FBBC05" d="M10.4 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.3.8-4.7l-7.8-6C.9 16.6 0 20.2 0 24s.9 7.4 2.6 10.7l7.8-6z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.8 2.3-8.4 2.3-6.4 0-11.7-4.1-13.6-9.8l-7.8 6C6.6 42.6 14.6 48 24 48z"/></svg>
+              Mit Google anmelden
+            </a>
+          ) : passwordLoginEnabled() ? (
+            <>
+              <p className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">Übergang: Google-Login ist noch nicht eingerichtet. Bis dahin gilt das Prototyp-Passwort.</p>
+              <LoginForm next={next} />
+            </>
+          ) : (
+            <p className="rounded-lg bg-pink-50 px-3 py-2 text-sm text-pink">Anmeldung ist noch nicht eingerichtet (GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET fehlen).</p>
+          )}
+          <p className="pt-6 text-center text-xs text-muted">Zugang nur für das moovin-Team. Neue Kolleginnen und Kollegen schaltet ein Admin frei.</p>
         </div>
       </section>
     </main>
