@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { env, zohoConfigured } from "@/lib/env";
-import { syncCrmObjects } from "@/lib/crm/zoho";
+import { env } from "@/lib/env";
+import { syncCrmObjects, zohoReady } from "@/lib/crm/zoho";
 import { housekeeping } from "@/lib/workflow";
 import { audit } from "@/lib/audit";
 
@@ -15,6 +15,6 @@ export async function GET(req: NextRequest) {
   if (!ok) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const r = await housekeeping("cron");
   await audit("cron", "ticket", { event: "tagespflege", ...r });
-  const crm = zohoConfigured() ? await syncCrmObjects("cron") : null;
+  const crm = (await zohoReady()).ready ? await syncCrmObjects("cron") : null;
   return NextResponse.json({ ok: true, ...r, crm: crm ? { ok: crm.ok, rows: crm.rows, withAm: crm.withAm, error: crm.error } : "nicht eingerichtet" });
 }

@@ -2,7 +2,7 @@ import "server-only";
 import { sql } from "../db";
 import { env, zohoConfigured } from "../env";
 import { audit } from "../audit";
-import { setSetting } from "../settings";
+import { getSetting, setSetting } from "../settings";
 import { addressKey, resolveAmEmail } from "./match";
 import { invalidateObjectCache } from "./objects";
 
@@ -20,16 +20,58 @@ const FIELDS = "Deal_Name, Stage, Neu_Zust_ndiger_Account_Manager, Stra_e, PLZ, 
 type Deal = Record<string, string | null> & { id: string };
 export type CrmSyncResult = { ok: boolean; at: string; rows: number; live: number; withAm: number; deactivated: number; unresolved: string[]; error?: string };
 
-async function accessToken(): Promise<string> {
-  const p = new URLSearchParams({ refresh_token: env.zohoRefreshToken(), client_id: env.zohoClientId(), client_secret: env.zohoClientSecret(), grant_type: "refresh_token" });
+// Zugang: Umgebungsvariablen (ZOHO_*) oder – ohne Umweg über Vercel – „Zoho verbinden“ auf der Seite Objekte (Self Client, Code).
+// Der Refresh-Token hat nur Lese-Scopes und liegt dann serverseitig in ticket.settings („zoho_auth“), nie im Browser.
+type ZohoAuth = { client_id: string; client_secret: string; refresh_token: string; api_domain?: string; connected_at?: string; connected_by?: string };
+
+async function zohoAuth(): Promise<(ZohoAuth & { source: "env" | "app" }) | null> {
+  if (zohoConfigured()) return { client_id: env.zohoClientId(), client_secret: env.zohoClientSecret(), refresh_token: env.zohoRefreshToken(), source: "env" };
+  const s = await getSetting<ZohoAuth>("zoho_auth").catch(() => null);
+  return s?.refresh_token ? { ...s, source: "app" } : null;
+}
+
+/** Ist ein Zoho-Zugang hinterlegt (Umgebung oder in der App verbunden)? */
+export async function zohoReady(): Promise<{ ready: boolean; source: "env" | "app" | null; connectedAt?: string; connectedBy?: string }> {
+  const a = await zohoAuth();
+  return { ready: !!a, source: a?.source ?? null, connectedAt: a?.connected_at, connectedBy: a?.connected_by };
+}
+
+function apiBase(a: { api_domain?: string }) {
+  // Im Test zeigt ZOHO_TEST_BASE auf den lokalen Testserver; sonst die Domain aus der Zoho-Antwort bzw. EU-Standard
+  return (process.env.NODE_ENV !== "production" && process.env.ZOHO_TEST_BASE) || a.api_domain || env.zohoApiBase();
+}
+
+/**
+ * „Zoho verbinden“: Code aus dem Self Client (api-console.zoho.eu → Self Client → Generate Code, Scopes nur lesend)
+ * gegen einen Refresh-Token tauschen und serverseitig speichern. Danach läuft der Abgleich täglich.
+ */
+export async function connectZoho(input: { clientId: string; clientSecret: string; code: string }, actor: string) {
+  const p = new URLSearchParams({ grant_type: "authorization_code", client_id: input.clientId.trim(), client_secret: input.clientSecret.trim(), code: input.code.trim() });
+  const r = await fetch(`${env.zohoAccountsUrl()}/oauth/v2/token`, { method: "POST", body: p, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+  const j = (await r.json().catch(() => ({}))) as { refresh_token?: string; api_domain?: string; scope?: string; error?: string };
+  if (!r.ok || !j.refresh_token) throw new Error(`Zoho hat den Code nicht angenommen (${j.error ?? r.status}). Code ist nur wenige Minuten gültig – bitte neu erzeugen.`);
+  const scope = String(j.scope ?? "");
+  if (/(CREATE|UPDATE|DELETE|WRITE|ALL)/i.test(scope)) throw new Error("Bitte nur Lese-Scopes vergeben (ZohoCRM.coql.READ, ZohoCRM.modules.deals.READ, ZohoCRM.users.READ).");
+  await setSetting("zoho_auth", { client_id: input.clientId.trim(), client_secret: input.clientSecret.trim(), refresh_token: j.refresh_token,
+    api_domain: j.api_domain, connected_at: new Date().toISOString(), connected_by: actor } satisfies ZohoAuth, actor);
+  await audit(actor, "settings", { event: "zoho_verbunden", api_domain: j.api_domain ?? null, scope });
+}
+
+export async function disconnectZoho(actor: string) {
+  await sql`delete from ticket.settings where key = 'zoho_auth'`;
+  await audit(actor, "settings", { event: "zoho_getrennt" });
+}
+
+async function accessToken(a: ZohoAuth): Promise<string> {
+  const p = new URLSearchParams({ refresh_token: a.refresh_token, client_id: a.client_id, client_secret: a.client_secret, grant_type: "refresh_token" });
   const r = await fetch(`${env.zohoAccountsUrl()}/oauth/v2/token`, { method: "POST", body: p, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
   const j = (await r.json().catch(() => ({}))) as { access_token?: string; error?: string };
   if (!r.ok || !j.access_token) throw new Error(`Zoho-Anmeldung fehlgeschlagen (${r.status} ${j.error ?? ""})`.trim());
   return j.access_token;
 }
 
-async function coql(token: string, query: string): Promise<Deal[]> {
-  const r = await fetch(`${env.zohoApiBase()}/crm/v8/coql`, {
+async function coql(api: string, token: string, query: string): Promise<Deal[]> {
+  const r = await fetch(`${api}/crm/v8/coql`, {
     method: "POST", headers: { Authorization: `Zoho-oauthtoken ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ select_query: query }),
   });
   if (r.status === 204) return [];
@@ -38,20 +80,20 @@ async function coql(token: string, query: string): Promise<Deal[]> {
   return j.data ?? [];
 }
 
-async function coqlAll(token: string, where: string): Promise<Deal[]> {
+async function coqlAll(api: string, token: string, where: string): Promise<Deal[]> {
   const out: Deal[] = [];
   for (let offset = 0; offset < 50_000; offset += 2000) {
-    const page = await coql(token, `select ${FIELDS} from Deals where ${where} order by id asc limit ${offset}, 2000`);
+    const page = await coql(api, token, `select ${FIELDS} from Deals where ${where} order by id asc limit ${offset}, 2000`);
     out.push(...page);
     if (page.length < 2000) break;
   }
   return out;
 }
 
-async function crmUsers(token: string): Promise<{ full_name: string; email: string; active: boolean }[]> {
+async function crmUsers(api: string, token: string): Promise<{ full_name: string; email: string; active: boolean }[]> {
   const out: { full_name: string; email: string; active: boolean }[] = [];
   for (let page = 1; page <= 10; page++) {
-    const r = await fetch(`${env.zohoApiBase()}/crm/v8/users?type=AllUsers&per_page=200&page=${page}`, { headers: { Authorization: `Zoho-oauthtoken ${token}` } });
+    const r = await fetch(`${api}/crm/v8/users?type=AllUsers&per_page=200&page=${page}`, { headers: { Authorization: `Zoho-oauthtoken ${token}` } });
     if (r.status === 204) break;
     const j = (await r.json().catch(() => ({}))) as { users?: { full_name: string; email: string; status: string }[]; info?: { more_records?: boolean } };
     if (!r.ok) throw new Error(`Zoho Benutzer ${r.status}`);
@@ -65,17 +107,19 @@ const q = (s: string) => `'${s.replace(/'/g, "\\'")}'`;
 
 export async function syncCrmObjects(actor = "system"): Promise<CrmSyncResult> {
   const at = new Date().toISOString();
-  if (!zohoConfigured()) {
-    const res: CrmSyncResult = { ok: false, at, rows: 0, live: 0, withAm: 0, deactivated: 0, unresolved: [], error: "Zoho-Zugang nicht hinterlegt (ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN)" };
+  const auth = await zohoAuth();
+  if (!auth) {
+    const res: CrmSyncResult = { ok: false, at, rows: 0, live: 0, withAm: 0, deactivated: 0, unresolved: [], error: "Zoho-Zugang fehlt – unter „Objekte“ mit Zoho verbinden" };
     await setSetting("crm_sync", res, actor);
     return res;
   }
   try {
-    const token = await accessToken();
+    const api = apiBase(auth);
+    const token = await accessToken(auth);
     const since = new Date(Date.now() - RECENT_CLOSED_DAYS * 86_400_000).toISOString().replace(/\.\d{3}Z$/, "+00:00");
-    const open = await coqlAll(token, `Pipeline = 'Vermietung' and Stage not in (${CLOSED_STAGES.map(q).join(", ")})`);
-    const recent = await coqlAll(token, `Pipeline = 'Vermietung' and Stage in (${q("abgeschlossen (gewonnen)")}, ${q("Rechnungserstellung")}) and Modified_Time >= '${since}'`);
-    const users = await crmUsers(token);
+    const open = await coqlAll(api, token, `Pipeline = 'Vermietung' and Stage not in (${CLOSED_STAGES.map(q).join(", ")})`);
+    const recent = await coqlAll(api, token, `Pipeline = 'Vermietung' and Stage in (${q("abgeschlossen (gewonnen)")}, ${q("Rechnungserstellung")}) and Modified_Time >= '${since}'`);
+    const users = await crmUsers(api, token);
 
     // Eine Zeile je Objekt; bei doppelter moovin-ID gewinnt das Objekt in Vermarktung bzw. das zuletzt geänderte
     const byId = new Map<string, Deal>();
