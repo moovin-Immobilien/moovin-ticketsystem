@@ -1,11 +1,10 @@
 import Link from "next/link";
 import { sql } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
-import { zohoConfigured } from "@/lib/env";
 import { getSetting, moovinEnabled } from "@/lib/settings";
-import type { CrmSyncResult } from "@/lib/crm/zoho";
+import { zohoReady, type CrmSyncResult } from "@/lib/crm/zoho";
 import { fmtLong } from "@/components/ui";
-import { setMoovinModeAction, syncCrmAction } from "./actions";
+import { setMoovinModeAction, syncCrmAction, connectZohoAction, disconnectZohoAction } from "./actions";
 import { addAgentAction } from "../team/actions";
 
 /** Objekte & Zuordnung (Admin): moovin-Anbindung an/aus, CRM-Abgleich Objekt → AM, AMs laut CRM, Objektsuche. */
@@ -13,6 +12,8 @@ export default async function Objekte(props: PageProps<"/objekte">) {
   await requireAdmin();
   const sp = await props.searchParams;
   const q = typeof sp.q === "string" ? sp.q.trim() : "";
+  const zohoMsg = typeof sp.zoho === "string" ? sp.zoho : "";
+  const zoho = await zohoReady();
   const moovinOn = await moovinEnabled();
   const sync = await getSetting<CrmSyncResult>("crm_sync");
   const [stats] = await sql`select count(*) filter (where active) as active, count(*) filter (where active and live) as live,
@@ -60,10 +61,30 @@ export default async function Objekte(props: PageProps<"/objekte">) {
         </div>
         {sync?.error && <p className="text-sm text-pink">{sync.error}</p>}
         {sync?.unresolved?.length ? <p className="text-sm text-amber-700">AM-Namen ohne eindeutige CRM-Adresse: {sync.unresolved.join(", ")}</p> : null}
-        <form action={syncCrmAction}>
-          <button className="btn-ghost" disabled={!zohoConfigured()}>Jetzt abgleichen</button>
-          {!zohoConfigured() && <span className="ml-3 text-xs text-muted">Zoho-Zugang fehlt: ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN (Self Client, Scopes ZohoCRM.coql.READ, ZohoCRM.modules.deals.READ, ZohoCRM.users.READ).</span>}
-        </form>
+        {zohoMsg && <p className="text-sm rounded-lg bg-canvas px-3 py-2" data-testid="zoho-msg">{zohoMsg}</p>}
+        {zoho.ready ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <form action={syncCrmAction}><button className="btn-ghost">Jetzt abgleichen</button></form>
+            <span className="text-xs text-muted" data-testid="zoho-status">Zoho verbunden {zoho.source === "env" ? "(Umgebungsvariablen)" : `seit ${fmtLong(zoho.connectedAt)}${zoho.connectedBy ? ` (${zoho.connectedBy.replace("am:", "")})` : ""}`}</span>
+            {zoho.source === "app" && <form action={disconnectZohoAction}><button className="text-xs text-muted hover:text-pink underline">Verbindung trennen</button></form>}
+          </div>
+        ) : (
+          <form action={connectZohoAction} className="rounded-lg border border-line p-4 space-y-3" data-testid="zoho-connect">
+            <div className="font-medium text-ink text-sm">Zoho einmalig verbinden (nur lesend, ca. 3 Minuten)</div>
+            <ol className="text-xs text-muted list-decimal pl-4 space-y-1 max-w-3xl">
+              <li>api-console.zoho.eu öffnen (mit dem moovin-Zoho-Konto) → „Add Client“ → „Self Client“ → anlegen.</li>
+              <li>Reiter „Generate Code“: Scope <code className="text-ink">ZohoCRM.coql.READ,ZohoCRM.modules.deals.READ,ZohoCRM.users.READ</code>, Dauer 10 Minuten, Beschreibung „Ticketsystem“ → „Create“ → Code kopieren.</li>
+              <li>Reiter „Client Secret“: Client ID und Client Secret kopieren und mit dem Code hier eintragen. Der Code ist nur wenige Minuten gültig.</li>
+            </ol>
+            <div className="flex flex-wrap gap-2">
+              <input name="client_id" required placeholder="Client ID" className="input w-64" autoComplete="off" />
+              <input name="client_secret" required type="password" placeholder="Client Secret" className="input w-64" autoComplete="off" />
+              <input name="code" required placeholder="Code (1000.…)" className="input w-72" autoComplete="off" />
+              <button className="btn-pink">Verbinden & abgleichen</button>
+            </div>
+            <p className="text-xs text-muted">Gespeichert wird nur ein Lese-Token, serverseitig. Ins CRM wird nichts geschrieben.</p>
+          </form>
+        )}
         <p className="text-xs text-muted">Zuordnung der letzten 30 Tage: CRM per moovin-ID {Number(routing.crm_id)} · CRM per Adresse {Number(routing.crm_adresse)} · moovin {Number(routing.moovin)} · manuell {Number(routing.manuell)} · aktuell im Allgemeinen Eingang {Number(routing.pool)}</p>
       </section>
 
