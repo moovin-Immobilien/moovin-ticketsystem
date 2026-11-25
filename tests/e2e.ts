@@ -18,6 +18,9 @@ import postgres from "postgres";
 import { parseBrevo, parsePostmark } from "../src/lib/inbound/parse";
 import { checkIdClaims } from "../src/lib/oidc";
 import { normalizeAddress, addressKey, matchObjects, resolveAmEmail, type CrmObject } from "../src/lib/crm/match";
+import { evaluateSignals, followUpTasks, docKind, type EvaluateInput } from "../src/lib/signals";
+import { addWorkingHours, dueBeforeDeadline } from "../src/lib/sla";
+import type { ApplicantContext, Application } from "../src/lib/moovin/types";
 
 // ---------- Umgebung ----------
 function loadEnvLocal() {
@@ -215,7 +218,8 @@ async function mailIn(o: Parameters<typeof brevoItem>[0]) {
   const msg = await until(async () => (await sql`select * from ticket.messages where id > ${before} and from_email = ${o.from} and direction = 'in'`)[0]);
   // KI-Verarbeitung abwarten (Entwurf zur Nachricht)
   await until(async () => (await sql`select 1 from ticket.drafts where in_message_id = ${msg.id}`)[0]);
-  return (await sql`select * from ticket.tickets where id = ${msg.ticket_id}`)[0];
+  // Analyse abgeschlossen (Status, Zuordnung und Signale werden nach dem Entwurf gesetzt)
+  return until(async () => (await sql`select * from ticket.tickets where id = ${msg.ticket_id} and status <> 'neu'`)[0]);
 }
 async function sendFromUi(page: Page, ticketId: number, opts: { awaitReply?: boolean } = {}) {
   await page.goto(`${BASE}/tickets/${ticketId}`);
@@ -282,6 +286,68 @@ async function main() {
       assert(resolveAmEmail("Caluta Blessing Osei", users) === "osei@moovin.de", "Osei");
       assert(resolveAmEmail("Tanja Muster", users) === null, "mehrdeutig zugeordnet");
       assert(resolveAmEmail("Max Mustermann", users) === null, "Unbekannter zugeordnet");
+    });
+
+    // ---------- Ticket-Intelligenz (reine Funktionen) ----------
+    const NOW = new Date("2026-11-25T10:00:00+01:00"); // Mittwoch
+    const app = (o: Partial<Application>): Application => ({ id: "AP-1", listing_id: "MV-X", object_title: "Testweg 1", status: "eingeladen", missing_documents: [], appointment: null, ...o });
+    const ctxOf = (...apps: Application[]): ApplicantContext => ({ applicant: { id: "A-1", last_name: "Test" }, applications: apps });
+    const ev = (o: Partial<EvaluateInput>) => evaluateSignals({ raw: [], intent: "sonstiges", attachments: [], ctx: null, moovinOn: true, unansweredInbound: 1, actionCount: 0, now: NOW, ...o });
+    const viewedApp = app({ status: "besichtigt", appointment: { id: "AT-1", starts_at: "2026-11-21T17:00:00Z", status: "stattgefunden" } });
+    await check("Signal Unterlagen: nach Besichtigung → Stufe 1; alle fehlenden geschickt → Stufe 1; sonst nur Hinweis", async () => {
+      const a = ev({ attachments: [{ filename: "a.pdf" }, { filename: "b.pdf" }, { filename: "c.pdf" }], ctx: ctxOf(viewedApp) });
+      assert(a.priority === 1 && /3 Unterlage\(n\) nach Besichtigung am 21\.11\./.test(a.signals[0].why), JSON.stringify(a));
+      const b = ev({ attachments: [{ filename: "SCHUFA.pdf" }, { filename: "Gehalt_Okt.pdf" }], ctx: ctxOf(app({ status: "unvollstaendig", missing_documents: ["SCHUFA-Auskunft", "Gehaltsnachweise der letzten 3 Monate"] })) });
+      assert(b.priority === 1 && /Fehlten: Gehaltsnachweise, SCHUFA → alle geschickt|Fehlten: SCHUFA, Gehaltsnachweise → alle geschickt/.test(b.signals[0].why), JSON.stringify(b));
+      const c = ev({ attachments: [{ filename: "Gehalt.pdf" }], ctx: ctxOf(app({ status: "unvollstaendig", missing_documents: ["Gehaltsnachweise", "Mietschuldenfreiheitsbescheinigung"] })) });
+      assert(c.priority === 3 && c.signals[0].stage === 3, JSON.stringify(c));
+      assert(docKind("Personalausweis_Rueckseite.jpg") === "Ausweis" && docKind("Foto.jpg") === null, "Unterlagenart");
+    });
+    await check("Signale Anmietwunsch/Vertrag/Frist: nur mit passendem Status Stufe 1, sperren immer den Auto-Versand", async () => {
+      const z = ev({ raw: [{ type: "zusage_nach_besichtigung", evidence: "wir möchten die Wohnung nehmen" }], ctx: ctxOf(viewedApp) });
+      assert(z.priority === 1 && z.autoBlocked && z.signals[0].confirmed, JSON.stringify(z));
+      const z2 = ev({ raw: [{ type: "zusage_nach_besichtigung", evidence: "x" }], ctx: ctxOf(app({ status: "eingeladen" })) });
+      assert(z2.priority === 3 && z2.autoBlocked, `vor Besichtigung: ${JSON.stringify(z2)}`);
+      const v = ev({ raw: [{ type: "vertragsphase", evidence: "Kaution" }], ctx: ctxOf(app({ status: "beim_eigentuemer" })) });
+      const v2 = ev({ raw: [{ type: "vertragsphase", evidence: "Kaution" }], ctx: ctxOf(app({ status: "in_pruefung" })) });
+      assert(v.priority === 1 && v2.priority === 3, `${v.priority}/${v2.priority}`);
+      const k = ev({ raw: [{ type: "konkurrenz_frist", evidence: "bis Freitag", deadline: "2026-11-27" }], ctx: ctxOf(app({ status: "eingeladen" })) });
+      const k2 = ev({ raw: [{ type: "konkurrenz_frist", evidence: "bis Freitag", deadline: "2026-11-27" }], ctx: ctxOf(app({ status: "absage" })) });
+      assert(k.priority === 1 && k.deadline === "2026-11-27" && /Entscheidet bis 27\.11\./.test(k.signals[0].why) && k2.priority === 3 && !k2.deadline, JSON.stringify([k, k2]));
+    });
+    await check("Signale zeitkritisch: Termin < 48 h, Rückzug spät, Eskalation, Nachgehakt → Stufe 2; Gegenfälle nicht", async () => {
+      const soon = app({ appointment: { id: "AT-2", starts_at: "2026-11-26T17:00:00Z", status: "bestaetigt" } });
+      const later = app({ appointment: { id: "AT-3", starts_at: "2026-11-28T17:00:00Z", status: "bestaetigt" } });
+      const t1 = ev({ intent: "termin_absage", ctx: ctxOf(soon) });
+      assert(t1.priority === 2 && t1.signals[0].type === "termin_bald", JSON.stringify(t1));
+      assert(ev({ intent: "termin_absage", raw: [{ type: "termin_bald" }], ctx: ctxOf(later) }).priority === 3, "Termin in 3 Tagen");
+      const f = followUpTasks(t1.signals, "termin_absage");
+      assert(f[0]?.type === "slot_nachbesetzen" && f[0].priority === 2, JSON.stringify(f));
+      const r = ev({ intent: "rueckzug", ctx: ctxOf(app({ status: "beim_eigentuemer" })) });
+      assert(r.priority === 2 && followUpTasks(r.signals, "rueckzug")[0].type === "kandidat_aktivieren", JSON.stringify(r));
+      assert(ev({ intent: "rueckzug", ctx: ctxOf(app({ status: "eingeladen" })) }).priority === 3, "früher Rückzug");
+      const e = ev({ raw: [{ type: "eskalation", evidence: "zum dritten Mal" }] });
+      assert(e.priority === 2 && e.autoBlocked, JSON.stringify(e));
+      assert(ev({ unansweredInbound: 2 }).signals[0]?.type === "nachgehakt" && ev({ unansweredInbound: 1 }).priority === 3, "Nachgehakt");
+    });
+    await check("Kein Handlungsbedarf nur ohne Anhang, Aktion und anderes Signal; abgeschaltet/verworfen fällt weg; moovin aus → „laut Mail“", async () => {
+      const d = { type: "kein_handlungsbedarf", evidence: "Danke, bis Montag" };
+      assert(ev({ raw: [d] }).priority === 4 && ev({ raw: [d] }).autoBlocked, "D");
+      assert(ev({ raw: [d], attachments: [{ filename: "x.pdf" }] }).priority !== 4, "mit Anhang");
+      assert(ev({ raw: [d], actionCount: 1 }).priority === 3, "mit Aktion");
+      assert(ev({ raw: [d], unansweredInbound: 3 }).priority === 2, "nachgehakt schlägt D");
+      assert(ev({ raw: [{ type: "eskalation" }], disabled: ["eskalation"] }).priority === 3, "abgeschaltet");
+      assert(ev({ raw: [{ type: "zusage_nach_besichtigung" }], ctx: ctxOf(viewedApp), rejected: ["zusage_nach_besichtigung"] }).priority === 3, "verworfen");
+      const off = ev({ raw: [{ type: "zusage_nach_besichtigung", evidence: "nehmen" }], moovinOn: false });
+      assert(off.priority === 1 && off.signals[0].basis === "mail" && !off.signals[0].confirmed && /laut Mail/.test(off.signals[0].why), JSON.stringify(off));
+      assert(ev({ raw: [{ type: "bonitaet_gut", evidence: "verdiene gut" }, { type: "herkunft" }] }).signals.length === 0, "Personenmerkmal als Signal");
+    });
+    await check("SLA nach Stufe: Arbeitsstunden Mo–Fr 8–18 Uhr, Frist minus Puffer", async () => {
+      const fri = new Date("2026-11-27T17:00:00+01:00");
+      assert(addWorkingHours(new Date("2026-11-25T10:00:00+01:00"), 2).toISOString() === new Date("2026-11-25T12:00:00+01:00").toISOString(), "2 h");
+      assert(addWorkingHours(fri, 2).toISOString() === new Date("2026-11-30T09:00:00+01:00").toISOString(), `Wochenende: ${addWorkingHours(fri, 2).toISOString()}`);
+      assert(addWorkingHours(new Date("2026-11-28T11:00:00+01:00"), 4).toISOString() === new Date("2026-11-30T12:00:00+01:00").toISOString(), "Samstag");
+      assert(dueBeforeDeadline("2026-11-27", NOW)!.toISOString() === new Date("2026-11-26T12:00:00+01:00").toISOString(), "Frist");
     });
 
     console.log("\n1 Login (nur Google)");
@@ -676,7 +742,81 @@ async function main() {
       assert(await lena.locator('[data-testid="banner-moovin-off"]').count() === 0, "Hinweis bleibt");
     });
 
-    console.log("\n14 Leitplanken");
+    console.log("\n14 Ticket-Intelligenz");
+    let mehmetId = 0;
+    await check("Fall B: Unterlagen nach Besichtigung, Auto-Antwort → markierte Aufgabe ganz oben, Zähler „Chancen“", async () => {
+      await sql`update ticket.intent_settings set mode = 'auto', threshold = 0.8 where intent = 'unterlagen_nachreichen'`;
+      const t = await mailIn({ from: "mehmet.yilmaz@example.org", name: "Mehmet Yilmaz", subject: "Unterlagen", text: "Guten Tag,\n\nanbei meine SCHUFA wie besprochen.\n\nMehmet Yilmaz", attachments: [{ name: "SCHUFA_Yilmaz.pdf", token: "tok-schufa" }] });
+      mehmetId = Number(t.id);
+      await until(async () => (await sql`select 1 from ticket.tasks where ticket_id = ${mehmetId} and type = 'unterlagen_pruefen'`)[0]);
+      assert((await sql`select sent_by from ticket.messages where ticket_id = ${mehmetId} and direction = 'out' order by id desc limit 1`)[0].sent_by === "ki", "nicht automatisch");
+      await sql`update ticket.intent_settings set mode = 'entwurf' where intent = 'unterlagen_nachreichen'`;
+      const [s] = await sql`select signals from ticket.tickets where id = ${mehmetId}`;
+      assert(s.signals[0]?.type === "unterlagen_eingegangen" && s.signals[0].stage === 1 && s.signals[0].confirmed, JSON.stringify(s.signals));
+      const [k] = await sql`select * from ticket.tasks where ticket_id = ${mehmetId} and type = 'unterlagen_pruefen'`;
+      assert(k && k.priority === 1 && k.assignee_email === JONAS && /Abschluss-Chance/.test(k.text), JSON.stringify(k));
+      await jonas.goto(`${BASE}/mein?tab=aufgaben`);
+      assert((await jonas.locator('[data-testid="task-list"] > div').first().innerText()).includes("Abschluss-Chance"), "Aufgabe nicht oben");
+      assert(Number(await jonas.locator('[data-testid="count-chancen"]').innerText()) >= 1, "Zähler Chancen");
+    });
+    await check("Fall D: „Vielen Dank, bis Montag!“ → Stufe 4 ganz unten, kein Entwurf, „Ohne Antwort schließen“", async () => {
+      const t = await mailIn({ from: "mehmet.yilmaz@example.org", name: "Mehmet Yilmaz", subject: "Danke", text: "Vielen Dank, bis Montag!" });
+      assert(Number(t.id) === mehmetId && t.priority === 4 && t.status === "entwurf", JSON.stringify({ id: t.id, p: t.priority, s: t.status }));
+      const [d] = await sql`select body_text from ticket.drafts where ticket_id = ${mehmetId} order by id desc limit 1`;
+      assert(!d.body_text.trim(), `Entwurf: ${d.body_text}`);
+      await jonas.goto(`${BASE}/mein?tab=todo`);
+      const last = jonas.locator("tbody tr").last();
+      assert((await last.getAttribute("data-testid")) === `row-${mehmetId}` && (await last.innerText()).includes("Kein Handlungsbedarf"), "nicht unten");
+      await jonas.click(`[data-testid="close-${mehmetId}"]`);
+      await until(async () => (await sql`select status from ticket.tickets where id = ${mehmetId}`)[0].status === "geschlossen");
+    });
+    let chanceId = 0;
+    await check("Fall C: Anmietwunsch nach Besichtigung → nie automatisch (auch bei Auto), Stufe 1 ganz oben mit „Warum oben?“", async () => {
+      await sql`update ticket.intent_settings set mode = 'auto', threshold = 0.5 where intent = 'interesse_bestaetigen'`;
+      const t = await mailIn({ from: "mehmet.yilmaz@example.org", name: "Mehmet Yilmaz", subject: "Wohnung Spreeufer", text: "Guten Tag,\n\nvielen Dank für die Besichtigung. Ich möchte die Wohnung gerne anmieten.\n\nMehmet Yilmaz" });
+      chanceId = Number(t.id);
+      await wait(1500);
+      await sql`update ticket.intent_settings set mode = 'entwurf' where intent = 'interesse_bestaetigen'`;
+      const [r] = await sql`select priority, auto_handled, status, signals, due_at, chance_at from ticket.tickets where id = ${chanceId}`;
+      assert(r.priority === 1 && r.status === "entwurf" && r.chance_at, JSON.stringify(r));
+      const [o] = await sql`select count(*) as n from ticket.messages where ticket_id = ${chanceId} and direction = 'out'
+        and id > (select max(id) from ticket.messages where ticket_id = ${chanceId} and direction = 'in')`;
+      assert(Number(o.n) === 0, "automatisch gesendet");
+      assert(r.signals.some((x: { type: string; confirmed: boolean }) => x.type === "zusage_nach_besichtigung" && x.confirmed), JSON.stringify(r.signals));
+      assert(new Date(r.due_at).getTime() - Date.now() <= 3 * 24 * 3600_000, "SLA Stufe 1");
+      await jonas.goto(`${BASE}/mein?tab=todo`);
+      const first = jonas.locator("tbody tr").first();
+      assert((await first.getAttribute("data-testid")) === `row-${chanceId}`, `oben: ${await first.getAttribute("data-testid")}`);
+      assert((await first.innerText()).includes("Warum oben?") && (await first.innerText()).includes("Will anmieten"), await first.innerText());
+      await jonas.click('[data-testid="chancen"]');
+      assert((await jonas.locator("body").innerText()).includes(`T-${chanceId}`), "nicht unter Chancen");
+    });
+    await check("Termin < 48 h mit Beleg aus moovin (Julia, morgen); Lucas (in 3 Tagen) ohne", async () => {
+      const j = await mailIn({ from: "julia.becker@example.net", name: "Julia Becker", subject: "Besichtigung", text: "Ich komme morgen gerne zur Besichtigung." });
+      const js = j.signals as { type: string; confirmed: boolean; stage: number }[];
+      assert(js.some((x) => x.type === "termin_bald" && x.confirmed && x.stage === 2) && j.priority <= 2, JSON.stringify(js));
+      const l = await mailIn({ from: "lucas.martin@example.com", name: "Lucas Martin", subject: "Viewing", text: "I will come to the viewing tomorrow." });
+      assert(!(l.signals as { type: string }[]).some((x) => x.type === "termin_bald"), JSON.stringify(l.signals));
+    });
+    await check("„Markierung passt nicht“ → Signal fällt weg, Stufe neu, Trefferquote auf der Autonomie-Seite", async () => {
+      await jonas.goto(`${BASE}/tickets/${chanceId}`);
+      const f = jonas.locator('[data-testid="signal-feedback"]');
+      await f.locator("select").selectOption("zusage_nach_besichtigung");
+      await f.locator("button").click();
+      await until(async () => (await sql`select priority from ticket.tickets where id = ${chanceId}`)[0].priority !== 1);
+      assert((await sql`select 1 from ticket.signal_feedback where ticket_id = ${chanceId} and signal = 'zusage_nach_besichtigung'`).length, "keine Rückmeldung");
+      await admin.goto(`${BASE}/autonomie`);
+      const row = await admin.locator('[data-testid="signal-zusage_nach_besichtigung"]').innerText();
+      assert(/\b1\b/.test(row) && row.includes("0 %"), row);
+      assert((await sql`select 1 from ticket.audit_log where ticket_id = ${chanceId} and detail->>'event' = 'markierung_passt_nicht'`).length, "Audit fehlt");
+    });
+    await check("Dashboard zeigt Chancen je AM, Reaktionszeit Stufe 1, Eskalationen", async () => {
+      await admin.goto(`${BASE}/dashboard`);
+      const txt = await admin.locator('[data-testid="dashboard"]').innerText();
+      for (const s of ["Offene Chancen", "Chancen älter als 2 h", "Reaktion Stufe 1", "Chance → Zusage", "Eskalationen offen", "Offene Chancen je AM"]) assert(txt.includes(s), `fehlt: ${s}`);
+    });
+
+    console.log("\n15 Leitplanken");
     await check("Keine Mail an Bewerber ohne Freigabe/Auto-Regel (keine proaktiven Mails)", async () => {
       const toApplicants = brevo.sent.filter((m) => !String((m as { to: { email: string }[] }).to[0].email).endsWith("@moovin.de"));
       const outs = await sql`select count(*) from ticket.messages where direction = 'out'`;
