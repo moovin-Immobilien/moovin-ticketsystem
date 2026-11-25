@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { requireAdmin } from "@/lib/auth";
 import { setMoovinMode } from "@/lib/settings";
 import { syncCrmObjects, connectZoho, disconnectZoho } from "@/lib/crm/zoho";
+import { setupBrevoInbound } from "@/lib/mail-setup";
 
 /** moovin-Anbindung an/aus (Livetest ohne moovin-API). */
 export async function setMoovinModeAction(on: boolean) {
@@ -17,6 +18,16 @@ export async function syncCrmAction() {
   const admin = await requireAdmin();
   await syncCrmObjects(`am:${admin.email}`);
   revalidatePath("/objekte");
+  redirect("/objekte");
+}
+
+/** Brevo: Inbound-Webhook für die Empfangs-Subdomain anlegen (nur per API möglich; Schlüssel und Token bleiben auf dem Server). */
+export async function setupBrevoInboundAction() {
+  const admin = await requireAdmin();
+  let msg = "";
+  try { msg = await setupBrevoInbound(`am:${admin.email}`); } catch (e) { msg = (e as Error).message; }
+  revalidatePath("/objekte");
+  redirect(`/objekte?mail=${encodeURIComponent(msg)}`);
 }
 
 /** Zoho einmalig verbinden (Self Client: Client ID, Client Secret, Code mit Lese-Scopes) und gleich abgleichen. */
