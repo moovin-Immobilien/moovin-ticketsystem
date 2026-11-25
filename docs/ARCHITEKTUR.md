@@ -14,7 +14,7 @@
                                                    │ 5 moovin-API: Bewerber-Kontext, AM          │──HMAC──▶ moovin Ticket-API
                                                    │   sonst/aus: Objekt im Text → AM laut CRM   │◀─täglich, nur lesend── Zoho CRM
                                                    │ 6 Claude: Werkzeuge an Absender gebunden    │◀────────  (Guido)
-                                                   │ 7 Aktionen serverseitig validieren          │
+                                                   │ 7 Aktionen validieren, Signale → Stufe 1–4  │
                                                    │ 8 Auto-Regel? → senden + Aktionen           │──HMAC──▶ moovin (Schreiben)
                                                    │   sonst → Entwurf für AM                    │
                                                    └──────────────┬─────────────────────────────┘
@@ -41,12 +41,18 @@
 | `notes` | Interne Notizen und Weitergaben – nie an Bewerber, moovin oder KI |
 | `presence` | Wer hat ein Ticket gerade offen (Bearbeitungssperre, nur Anzeige) |
 | `crm_objects` | Spiegel aus Zoho CRM: Objekt (moovin-ID/Adresse) → AM-Name und -Adresse, Phase, „in Vermarktung“; täglicher Abgleich |
-| `settings` | Schalter und Stände, z. B. `moovin_api` (an/aus), `crm_sync` (letzter Abgleich) |
+| `settings` | Schalter und Stände, z. B. `moovin_api` (an/aus), `crm_sync` (letzter Abgleich), `signals_off` (abgeschaltete Signale) |
+| `signal_feedback` | „Markierung passt nicht“ je Ticket und Signal → Trefferquote (Ticket-Intelligenz) |
+
+Ticket-Intelligenz: `tickets.priority` (1 Chance, 2 zeitkritisch, 3 normal, 4 kein Handlungsbedarf), `tickets.signals` (Signal, Beleg,
+bestätigt, Basis Daten/Mail), `chance_at`/`chance_answered_at`/`chance_won_at` für die Messung, `tasks.priority`. Logik: `src/lib/signals.ts`
+(reine Funktionen, getestet), Aufgaben aus Fall B: `signalTasks` in `src/lib/workflow.ts`.
 
 ## Autonomie-Entscheidung
 Auto-Versand nur wenn: Intent-Modus `auto` ∧ nicht gesperrt ∧ Konfidenz ≥ Schwelle ∧ `needs_human = false` ∧
 Absender in moovin bekannt (bei moovin-Anbindung aus: nur allgemeine Anliegen) ∧ Antwort nicht leer und ohne `[AM: …]` ∧
-keine Aufgaben-Aktionen ∧ (keine Aktionen ∨ Absender verifiziert) ∧ keine KI-/moovin-Fehler.
+keine Aufgaben-Aktionen ∧ (keine Aktionen ∨ Absender verifiziert) ∧ keine KI-/moovin-Fehler ∧ kein Signal aus Fall C/D
+(Anmietwunsch, Vertrag, Frist, Eskalation, kein Handlungsbedarf).
 Messgröße für die Freischaltung: Anteil Entwürfe, die ein AM mit ≥ 97 % Wortähnlichkeit versendet hat (Ziel ≥ 90 %, min. 20 Fälle).
 
 ## Sicherheit – Verteidigung in Schichten
