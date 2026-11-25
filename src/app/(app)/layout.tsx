@@ -2,10 +2,12 @@ import Link from "next/link";
 import { requireAgent } from "@/lib/auth";
 import { sql } from "@/lib/db";
 import { demoMode } from "@/lib/env";
+import { moovinEnabled } from "@/lib/settings";
 import { logoutAction } from "../login/actions";
 
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   const agent = await requireAgent();
+  const moovinOn = await moovinEnabled();
   const [c] = await sql`select
       (select count(*) from ticket.tickets where assignee_email is null and status not in ('beantwortet','geschlossen') and merged_into is null) as eingang,
       (select count(*) from ticket.agents where not active and approved_at is null) as pending`;
@@ -45,6 +47,11 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
       {demoMode() && (
         <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs">
           <div className="mx-auto max-w-[90rem] px-6 py-1.5">Demo-Modus: Kein Claude-API-Key hinterlegt – Anliegen werden per Stichwortregeln erkannt. Mit Key arbeitet Claude.</div>
+        </div>
+      )}
+      {!moovinOn && (
+        <div className="bg-sky-50 border-b border-sky-200 text-sky-800 text-xs" data-testid="banner-moovin-off">
+          <div className="mx-auto max-w-[90rem] px-6 py-1.5">Livetest ohne moovin-Anbindung: Zuordnung zum AM über das CRM (Objekt in der Mail), keine Bewerberdaten – [AM: …]-Platzhalter ergänzen, Aktionen werden Aufgaben.</div>
         </div>
       )}
       <main className="mx-auto max-w-[90rem] w-full px-6 py-6 flex-1">{children}</main>

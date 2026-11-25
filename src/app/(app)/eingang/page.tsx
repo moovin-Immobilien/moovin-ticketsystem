@@ -20,6 +20,7 @@ export default async function Eingang() {
     t.deputy_for ? `AM ${t.deputy_for_name ?? t.deputy_for} abwesend, keine Vertretung`
     : t.intent === "nicht_zustaendig" ? "Nicht zuständig"
     : t.intent === "intern_system" ? "System-/interne Mail"
+    : t.routing_note ? String(t.routing_note)
     : !t.applicant_known ? "Kein Bewerber in moovin"
     : !t.object_id ? "Keine Zuordnung zu einer Wohnung"
     : "Kein AM hinterlegt";
@@ -28,7 +29,7 @@ export default async function Eingang() {
     <div className="space-y-5">
       <div>
         <h1 className="text-xl font-semibold text-navy">Allgemeiner Eingang</h1>
-        <p className="text-sm text-muted">Tickets ohne zuständigen AM. Objekt und/oder AM zuordnen – ohne AM-Auswahl übernimmt der AM, der das Objekt zuletzt betreut hat.</p>
+        <p className="text-sm text-muted">Tickets ohne zuständigen AM. Objekt und/oder AM zuordnen – ohne AM-Auswahl übernimmt der AM laut CRM, sonst der AM, der das Objekt zuletzt betreut hat.</p>
       </div>
       <datalist id="objects">{objects.map((o) => <option key={o.object_id} value={`${o.object_id} · ${o.object_title ?? ""}`} />)}</datalist>
 

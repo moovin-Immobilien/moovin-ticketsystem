@@ -52,5 +52,5 @@ export async function addAgentAction(form: FormData) {
   await sql`insert into ticket.agents (email, name, role, active, approved_at, approved_by) values (${email}, ${name}, 'am', true, now(), ${admin.email})
             on conflict (email) do update set active = true, approved_at = coalesce(ticket.agents.approved_at, now()), approved_by = coalesce(ticket.agents.approved_by, ${admin.email})`;
   await audit(`am:${admin.email}`, "settings", { event: "agent_angelegt", email });
-  revalidatePath("/team");
+  revalidatePath("/team"); revalidatePath("/objekte");
 }

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { sql } from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
 import { fmtLong } from "@/components/ui";
@@ -13,7 +14,10 @@ export default async function Team() {
   const actives = agents.filter((a) => a.active);
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold text-navy">Team</h1>
+      <div className="flex items-baseline justify-between">
+        <h1 className="text-xl font-semibold text-navy">Team</h1>
+        <Link href="/objekte" className="text-sm text-muted hover:text-navy" data-testid="link-objekte">Objekte & Zuordnung (CRM, moovin-Anbindung) →</Link>
+      </div>
 
       <section className="card p-5 space-y-3" data-testid="pending">
         <h2 className="font-semibold text-navy">Zugang beantragt ({pending.length})</h2>
