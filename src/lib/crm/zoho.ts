@@ -22,7 +22,12 @@ export type CrmSyncResult = { ok: boolean; at: string; rows: number; live: numbe
 
 // Zugang: Umgebungsvariablen (ZOHO_*) oder – ohne Umweg über Vercel – „Zoho verbinden“ auf der Seite Objekte (Self Client, Code).
 // Der Refresh-Token hat nur Lese-Scopes und liegt dann serverseitig in ticket.settings („zoho_auth“), nie im Browser.
-type ZohoAuth = { client_id: string; client_secret: string; refresh_token: string; api_domain?: string; connected_at?: string; connected_by?: string };
+type ZohoAuth = { client_id: string; client_secret: string; refresh_token: string; api_domain?: string; accounts_url?: string; connected_at?: string; connected_by?: string };
+
+// Zoho-Rechenzentren: Der Self Client existiert nur in dem Rechenzentrum, in dem das Zoho-Konto liegt (EU, US, …).
+// Beim Verbinden wird das richtige erkannt (invalid_client = falsches Rechenzentrum) und für den Abgleich gespeichert.
+const ZOHO_ACCOUNTS = ["https://accounts.zoho.eu", "https://accounts.zoho.com", "https://accounts.zoho.in", "https://accounts.zoho.com.au",
+  "https://accounts.zoho.jp", "https://accounts.zohocloud.ca", "https://accounts.zoho.sa", "https://accounts.zoho.uk"];
 
 async function zohoAuth(): Promise<(ZohoAuth & { source: "env" | "app" }) | null> {
   if (zohoConfigured()) return { client_id: env.zohoClientId(), client_secret: env.zohoClientSecret(), refresh_token: env.zohoRefreshToken(), source: "env" };
@@ -47,14 +52,27 @@ function apiBase(a: { api_domain?: string }) {
  */
 export async function connectZoho(input: { clientId: string; clientSecret: string; code: string }, actor: string) {
   const p = new URLSearchParams({ grant_type: "authorization_code", client_id: input.clientId.trim(), client_secret: input.clientSecret.trim(), code: input.code.trim() });
-  const r = await fetch(`${env.zohoAccountsUrl()}/oauth/v2/token`, { method: "POST", body: p, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
-  const j = (await r.json().catch(() => ({}))) as { refresh_token?: string; api_domain?: string; scope?: string; error?: string };
-  if (!r.ok || !j.refresh_token) throw new Error(`Zoho hat den Code nicht angenommen (${j.error ?? r.status}). Code ist nur wenige Minuten gültig – bitte neu erzeugen.`);
+  const first = env.zohoAccountsUrl();
+  const candidates = process.env.NODE_ENV !== "production" && process.env.ZOHO_TEST_BASE ? [first] : [first, ...ZOHO_ACCOUNTS.filter((u) => u !== first)];
+  let j: { refresh_token?: string; api_domain?: string; scope?: string; error?: string } = {};
+  let status = 0;
+  let accountsUrl = first;
+  for (const url of candidates) {
+    const r = await fetch(`${url}/oauth/v2/token`, { method: "POST", body: p, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+    j = (await r.json().catch(() => ({}))) as typeof j;
+    status = r.status;
+    accountsUrl = url;
+    if (j.error !== "invalid_client") break; // nur bei unbekanntem Client im nächsten Rechenzentrum versuchen
+  }
+  if (!j.refresh_token) {
+    if (j.error === "invalid_client") throw new Error("Zoho kennt Client ID/Client Secret nicht (invalid_client) – bitte beide Werte über das Kopier-Symbol im Reiter „Client Secret“ neu kopieren und einen neuen Code erzeugen.");
+    throw new Error(`Zoho hat den Code nicht angenommen (${j.error ?? status}). Code ist nur wenige Minuten gültig – bitte neu erzeugen.`);
+  }
   const scope = String(j.scope ?? "");
   if (/(CREATE|UPDATE|DELETE|WRITE|ALL)/i.test(scope)) throw new Error("Bitte nur Lese-Scopes vergeben (ZohoCRM.coql.READ, ZohoCRM.modules.deals.READ, ZohoCRM.users.READ).");
   await setSetting("zoho_auth", { client_id: input.clientId.trim(), client_secret: input.clientSecret.trim(), refresh_token: j.refresh_token,
-    api_domain: j.api_domain, connected_at: new Date().toISOString(), connected_by: actor } satisfies ZohoAuth, actor);
-  await audit(actor, "settings", { event: "zoho_verbunden", api_domain: j.api_domain ?? null, scope });
+    api_domain: j.api_domain, accounts_url: accountsUrl, connected_at: new Date().toISOString(), connected_by: actor } satisfies ZohoAuth, actor);
+  await audit(actor, "settings", { event: "zoho_verbunden", api_domain: j.api_domain ?? null, accounts_url: accountsUrl, scope });
 }
 
 export async function disconnectZoho(actor: string) {
@@ -64,7 +82,8 @@ export async function disconnectZoho(actor: string) {
 
 async function accessToken(a: ZohoAuth): Promise<string> {
   const p = new URLSearchParams({ refresh_token: a.refresh_token, client_id: a.client_id, client_secret: a.client_secret, grant_type: "refresh_token" });
-  const r = await fetch(`${env.zohoAccountsUrl()}/oauth/v2/token`, { method: "POST", body: p, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+  const url = (process.env.NODE_ENV !== "production" && process.env.ZOHO_TEST_BASE) || a.accounts_url || env.zohoAccountsUrl();
+  const r = await fetch(`${url}/oauth/v2/token`, { method: "POST", body: p, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
   const j = (await r.json().catch(() => ({}))) as { access_token?: string; error?: string };
   if (!r.ok || !j.access_token) throw new Error(`Zoho-Anmeldung fehlgeschlagen (${r.status} ${j.error ?? ""})`.trim());
   return j.access_token;
