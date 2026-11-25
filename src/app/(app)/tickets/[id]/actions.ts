@@ -35,6 +35,7 @@ export async function closeAction(ticketId: number) {
   const agent = await guard(ticketId);
   await closeTicket(ticketId, `am:${agent.email}`);
   revalidatePath(`/tickets/${ticketId}`);
+  revalidatePath("/mein");
 }
 
 export async function takeOverAction(ticketId: number) {
@@ -110,6 +111,23 @@ export async function mergeAction(ticketId: number, form: FormData) {
   await mergeTickets(ticketId, target, `am:${agent.email}`);
   revalidatePath(`/tickets/${ticketId}`);
   revalidatePath(`/tickets/${target}`);
+}
+
+/** Ticket-Intelligenz: „Markierung passt nicht“ – Signal am Ticket verwerfen, Stufe neu setzen, Trefferquote zählen. */
+export async function signalFeedbackAction(ticketId: number, form: FormData) {
+  const agent = await guard(ticketId);
+  const signal = String(form.get("signal") ?? "");
+  const [t] = await sql`select signals from ticket.tickets where id = ${ticketId}`;
+  const signals = ((t?.signals ?? []) as { type: string; stage: number }[]);
+  if (!signals.some((x) => x.type === signal)) return;
+  await sql`insert into ticket.signal_feedback (ticket_id, signal, agent_email) values (${ticketId}, ${signal}, ${agent.email}) on conflict do nothing`;
+  const rest = signals.filter((x) => x.type !== signal);
+  const top = Math.min(9, ...rest.filter((x) => x.stage <= 2).map((x) => x.stage));
+  const priority = top <= 2 ? top : rest.some((x) => x.stage === 4) ? 4 : 3;
+  await sql`update ticket.tickets set signals = ${sql.json(rest as never)}, priority = ${priority}, updated_at = now() where id = ${ticketId}`;
+  await audit(`am:${agent.email}`, "ticket", { event: "markierung_passt_nicht", signal, priority }, ticketId);
+  revalidatePath(`/tickets/${ticketId}`);
+  revalidatePath("/mein");
 }
 
 export async function reviewedAction(ticketId: number) {
