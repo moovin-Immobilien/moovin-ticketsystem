@@ -1,7 +1,8 @@
 import "server-only";
 import { sql } from "./db";
 import { audit } from "./audit";
-import { dueDate } from "./sla";
+import { dueDate, addWorkingHours } from "./sla";
+import { followUpTasks, type Signal } from "./signals";
 
 /** Heutiges Datum in Berlin (YYYY-MM-DD). */
 export function berlinToday(d = new Date()): string {
@@ -33,11 +34,11 @@ export async function effectiveAssignee(email: string | null): Promise<{ assigne
 
 // ---------- Aufgaben ----------
 
-export type TaskType = "verschiebewunsch" | "rueckzug" | "interesse" | "notiz" | "nachfassen" | "manuell";
+export type TaskType = "verschiebewunsch" | "rueckzug" | "interesse" | "notiz" | "nachfassen" | "manuell" | "unterlagen_pruefen" | "slot_nachbesetzen" | "kandidat_aktivieren";
 
-export async function createTask(t: { ticketId: number; type: TaskType; text: string; assignee: string | null; actionId?: number | null; createdBy?: string; due?: Date }) {
-  const [row] = await sql`insert into ticket.tasks (ticket_id, action_id, assignee_email, type, text, due_at, created_by)
-    values (${t.ticketId}, ${t.actionId ?? null}, ${t.assignee}, ${t.type}, ${t.text.slice(0, 1000)}, ${t.due ?? dueDate(new Date())}, ${t.createdBy ?? "system"})
+export async function createTask(t: { ticketId: number; type: TaskType; text: string; assignee: string | null; actionId?: number | null; createdBy?: string; due?: Date; priority?: number }) {
+  const [row] = await sql`insert into ticket.tasks (ticket_id, action_id, assignee_email, type, text, due_at, created_by, priority)
+    values (${t.ticketId}, ${t.actionId ?? null}, ${t.assignee}, ${t.type}, ${t.text.slice(0, 1000)}, ${t.due ?? dueDate(new Date())}, ${t.createdBy ?? "system"}, ${t.priority ?? 3})
     on conflict (action_id) do nothing returning id`;
   if (row) await audit(t.createdBy ?? "system", "ticket", { event: "aufgabe_angelegt", type: t.type, task: Number(row.id) }, t.ticketId);
   return row ? Number(row.id) : null;
@@ -57,6 +58,26 @@ export async function taskForAction(a: { id: number; ticket_id: number; type: st
   else if (manual && a.type === "termin_absagen") { type = "manuell"; text = "Besichtigungstermin in moovin absagen und Platz freigeben"; }
   if (!type) return null;
   return createTask({ ticketId: a.ticket_id, type, text, assignee: a.assignee_email, actionId: a.id });
+}
+
+/**
+ * Ticket-Intelligenz, Fall B: Die Antwort ist raus, die Arbeit bleibt (Unterlagen prüfen, Slot nachbesetzen, nächsten Kandidaten aktivieren).
+ * Gibt es schon eine passende offene Aufgabe (z. B. „Rückzug“ aus der Aktion), wird sie hochgestuft; sonst entsteht bei
+ * Auto-Antworten eine neue, markierte Aufgabe ganz oben in „Offene Aufgaben“.
+ */
+export async function signalTasks(ticketId: number, createNew: boolean) {
+  const [t] = await sql`select assignee_email, intent, signals from ticket.tickets where id = ${ticketId}`;
+  if (!t) return;
+  for (const f of followUpTasks((t.signals ?? []) as Signal[], t.intent)) {
+    const due = addWorkingHours(new Date(), f.priority === 1 ? 2 : 4);
+    const [same] = await sql`select id from ticket.tasks where ticket_id = ${ticketId} and status = 'offen' and type = any(${[f.type, ...f.merges]}) order by id desc limit 1`;
+    if (same) {
+      await sql`update ticket.tasks set priority = least(priority, ${f.priority}), due_at = least(due_at, ${due}),
+                text = case when text like ${f.text.split(" – ")[0] + "%"} then text else ${f.text.split(" – ")[0]} || ' – ' || text end where id = ${same.id}`;
+    } else if (createNew) {
+      await createTask({ ticketId, type: f.type, text: f.text, assignee: t.assignee_email, priority: f.priority, due, createdBy: "ki" });
+    }
+  }
 }
 
 export async function setTaskDone(taskId: number, actor: string, done: boolean) {
