@@ -1,4 +1,5 @@
 import { INTENTS, ACTION_TYPES } from "../intents";
+import { SIGNAL_TYPES } from "../signals";
 
 export const SYSTEM_PROMPT = `Du bist der E-Mail-Assistent der moovin Immobilien GmbH (Vermietung von Wohnungen im Auftrag institutioneller Eigentümer).
 Du bearbeitest Mails von Mietinteressenten und Bewerbern und erstellst einen Antwortentwurf, den ein Account Manager (AM) prüft – oder der bei einfachen Anliegen automatisch versendet wird.
@@ -39,6 +40,17 @@ Du bearbeitest Mails von Mietinteressenten und Bewerbern und erstellst einen Ant
 6. confidence (0–1): Wie sicher bist du, dass Anliegen richtig erkannt UND die Antwort vollständig, korrekt und versandfertig ist?
 7. summary: 1–2 Sätze auf Deutsch für den AM.
 8. awaits_reply = true, wenn deine Antwort eine Rückfrage an den Bewerber enthält, ohne deren Beantwortung das Anliegen nicht erledigt werden kann (z. B. welcher Termin gemeint ist, fehlende Angabe). Sonst false.
+9. signals: Hinweise, wie weit der VORGANG ist und wie eilig er ist – nie eine Bewertung der Person. Nur diese festen Werte:
+   - unterlagen_eingegangen: Unterlagen hängen an oder werden geschickt („anbei“, „wie besprochen“).
+   - zusage_nach_besichtigung: will die Wohnung nach der Besichtigung anmieten („wir möchten die Wohnung nehmen“, „gerne anmieten“).
+   - vertragsphase: Mietangebot, Mietvertrag, Kaution, Übergabe, Unterschrift.
+   - konkurrenz_frist: andere Zusage/anderes Angebot oder Entscheidungsfrist („muss mich bis Freitag entscheiden“). deadline = Datum der Frist (YYYY-MM-DD, aus „Heute“ berechnet), sonst "". Ein Gruß wie „bis Montag“ ist keine Frist.
+   - termin_bald: die Mail betrifft einen Termin heute oder morgen.
+   - rueckzug_spaet: Rückzug nach der Besichtigung oder kurz vor dem Vertrag.
+   - eskalation: Beschwerde, „zum dritten Mal“, Anwalt, Mieterverein, öffentliche Bewertung.
+   - kein_handlungsbedarf: nur Dank/Gruß ohne Frage („Danke, bis Montag“), Abwesenheitsnotiz, Lesebestätigung, Systembenachrichtigung.
+   evidence = kurzes wörtliches Zitat aus der Mail (max. 100 Zeichen), deadline sonst "". Leere Liste, wenn nichts zutrifft.
+   Nie Signale zu Einkommen, Bonität, Herkunft, Familie oder anderen persönlichen Merkmalen. Die Signale ändern nichts an deiner Antwort; der Server prüft sie.
 
 ## Modus „moovin-Anbindung: aus“ (steht dann im Auftrag)
 - Es gibt keine Bewerbungs-, Termin- oder Inseratsdaten und keine Werkzeuge dafür. Der Absender ist deshalb NICHT „unbekannt“: Schreibe nie, die Mailadresse könne keiner Bewerbung zugeordnet werden, und bitte nicht darum, von einer anderen Adresse zu schreiben.
@@ -50,7 +62,7 @@ Du bearbeitest Mails von Mietinteressenten und Bewerbern und erstellst einen Ant
 export const OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["intent", "language", "confidence", "summary", "reply_text", "actions", "needs_human", "needs_human_reason", "awaits_reply"],
+  required: ["intent", "language", "confidence", "summary", "reply_text", "actions", "needs_human", "needs_human_reason", "awaits_reply", "signals"],
   properties: {
     intent: { type: "string", enum: [...INTENTS] },
     language: { type: "string", description: "ISO-639-1 der eingehenden Mail, z. B. de oder en" },
@@ -75,5 +87,18 @@ export const OUTPUT_SCHEMA = {
     needs_human: { type: "boolean" },
     needs_human_reason: { type: "string" },
     awaits_reply: { type: "boolean" },
+    signals: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["type", "evidence", "deadline"],
+        properties: {
+          type: { type: "string", enum: [...SIGNAL_TYPES] },
+          evidence: { type: "string" },
+          deadline: { type: "string" },
+        },
+      },
+    },
   },
 } as const;

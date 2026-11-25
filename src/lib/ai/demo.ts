@@ -20,6 +20,24 @@ const RULES: [Intent, RegExp][] = [
   ["objekt_frage", /(haustier|hund|katze|stellplatz|parken|balkon|küche|aufzug|wbs|miete|pet|parking)/i],
 ];
 
+// Ticket-Intelligenz im Demo-Modus: Stichwortregeln statt Claude (der Server bestätigt die Signale wie sonst auch)
+function demoSignals(text: string, intent: Intent, hasAttachments: boolean): { type: string; evidence: string; deadline: string }[] {
+  const out: { type: string; evidence: string; deadline: string }[] = [];
+  const hit = (type: string, re: RegExp, deadline = "") => { const m = text.match(re); if (m) out.push({ type, evidence: m[0].slice(0, 100), deadline }); };
+  if (hasAttachments) out.push({ type: "unterlagen_eingegangen", evidence: "Anhang", deadline: "" });
+  hit("zusage_nach_besichtigung", /(wohnung (sehr )?gerne (nehmen|anmieten)|möchten? (die wohnung )?(gerne )?anmieten|wir nehmen die wohnung|would like to (take|rent) the (flat|apartment))/i);
+  hit("vertragsphase", /(mietvertrag|mietangebot|kaution|unterschrift|unterschreiben|schlüsselübergabe|lease agreement|deposit)/i);
+  const dm = text.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})?/);
+  const deadline = dm ? `${dm[3] ?? new Date().getFullYear()}-${dm[2].padStart(2, "0")}-${dm[1].padStart(2, "0")}` : "";
+  hit("konkurrenz_frist", /(andere(n|s)? (zusage|angebot)|(muss|müssen) (mich|uns) bis [^.!?\n]{1,30} entscheiden|entscheid\w* bis|frist bis)/i, deadline);
+  if (/(heute|morgen)/i.test(text)) hit("termin_bald", /(termin|besichtigung)[^.!?\n]{0,60}(heute|morgen)|(heute|morgen)[^.!?\n]{0,60}(termin|besichtigung)/i);
+  if (intent === "rueckzug") hit("rueckzug_spaet", /(nach der besichtigung|doch nicht|vor dem vertrag)/i);
+  hit("eskalation", /(zum (dritten|wiederholten|x-ten) mal|anwalt|mieterverein|verbraucherzentrale|bewertung)/i);
+  if (intent === "sonstiges" && !hasAttachments && !/\?/.test(text) && text.replace(/\s+/g, " ").length < 220)
+    hit("kein_handlungsbedarf", /(vielen dank|danke(schön)?|thank you|thanks|abwesen|out of office|automatische antwort|lesebestätigung)[^\n]{0,60}/i);
+  return out;
+}
+
 function fmt(d: string) {
   return new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(d));
 }
@@ -52,9 +70,13 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
     return `vielen Dank für Ihre Nachricht. Sie haben derzeit mehrere Besichtigungstermine:\n${list}\n\nBitte teilen Sie uns kurz mit, welchen Termin Sie meinen.`;
   };
 
+  const signals = demoSignals(`${i.subject}\n${i.newMessage}`, intent, i.attachments.length > 0);
+  const nothingToDo = signals.some((x) => x.type === "kein_handlungsbedarf");
   const general = ["spam", "nicht_zustaendig", "beschwerde", "wohnungssuche_allgemein", "konto_datenschutz", "technik_login"].includes(intent);
   const obj = i.crmObject?.title ? ` zur Wohnung ${i.crmObject.title}` : "";
-  if (i.moovinOff && !ctx && !general) {
+  if (nothingToDo) {
+    body = ""; reason = ""; conf = 0.8;
+  } else if (i.moovinOff && !ctx && !general) {
     // Livetest ohne moovin: keine Bewerberdaten → Platzhalter für den AM, Aktionen werden Aufgaben (keine moovin-Aufrufe)
     conf = 0.75;
     switch (intent) {
@@ -162,6 +184,7 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
     needs_human: needs,
     needs_human_reason: reason,
     awaits_reply: awaits,
+    signals,
   };
   return { result, model: "demo-regeln", usage: null, toolCalls: [] };
 }
