@@ -32,7 +32,8 @@ function buildUserMessage(i: AgentInput): string {
   return [
     `Heute: ${berlinNow()} (Europe/Berlin)`,
     `Absender: ${i.senderName || "(ohne Namen)"} <${i.senderEmail}>`,
-    `Absender in moovin bekannt: ${i.context ? "ja" : "nein"}`,
+    i.moovinOff ? "moovin-Anbindung: aus (Livetest) – keine Bewerbungsdaten, Aktionen werden Aufgaben für den AM" : `Absender in moovin bekannt: ${i.context ? "ja" : "nein"}`,
+    i.crmObject ? `Objekt laut CRM (aus der Mail erkannt): ${i.crmObject.title ?? i.crmObject.object_id} (${i.crmObject.object_id})` : "",
     `Absender verifiziert (DKIM/DMARC): ${i.senderVerified ? "ja" : "nein"}`,
     `Anhänge: ${i.attachments.length ? i.attachments.map((a) => `${a.filename} (${a.contentType})`).join(", ") : "keine"}`,
     hist ? `\nBisheriger Verlauf:\n<verlauf>\n${hist}\n</verlauf>` : "",
@@ -71,7 +72,7 @@ export async function runClaudeAgent(i: AgentInput): Promise<AgentOutput> {
       model,
       max_tokens: 12000,
       system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
-      tools: TOOLS,
+      tools: i.moovinOff ? TOOLS.filter((t) => t.name === "search_knowledge") : TOOLS,
       messages,
       output_config: { effort: "medium", format: { type: "json_schema", schema: OUTPUT_SCHEMA as unknown as Record<string, unknown> } },
     });
@@ -89,7 +90,8 @@ export async function runClaudeAgent(i: AgentInput): Promise<AgentOutput> {
         let out: unknown;
         try {
           const input = block.input as Record<string, string>;
-          if (block.name === "get_application_status") out = (await i.tools.getApplicationStatus()) ?? { info: "Absender in moovin unbekannt" };
+          if (i.moovinOff && block.name !== "search_knowledge") out = { info: "moovin-Anbindung aus – keine Daten" };
+          else if (block.name === "get_application_status") out = (await i.tools.getApplicationStatus()) ?? { info: "Absender in moovin unbekannt" };
           else if (block.name === "get_object_info") out = (await i.tools.getObjectInfo(String(input.listing_id ?? input.object_id ?? ""))) ?? { info: "Inserat nicht gefunden oder nicht freigegeben" };
           else if (block.name === "search_knowledge") out = await i.tools.searchKnowledge(String(input.query ?? ""));
           else out = { error: "Unbekanntes Werkzeug" };

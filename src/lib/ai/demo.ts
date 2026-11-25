@@ -52,7 +52,41 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
     return `vielen Dank für Ihre Nachricht. Sie haben derzeit mehrere Besichtigungstermine:\n${list}\n\nBitte teilen Sie uns kurz mit, welchen Termin Sie meinen.`;
   };
 
-  if (!ctx && !["spam", "nicht_zustaendig", "beschwerde", "wohnungssuche_allgemein", "konto_datenschutz", "technik_login"].includes(intent)) {
+  const general = ["spam", "nicht_zustaendig", "beschwerde", "wohnungssuche_allgemein", "konto_datenschutz", "technik_login"].includes(intent);
+  const obj = i.crmObject?.title ? ` zur Wohnung ${i.crmObject.title}` : "";
+  if (i.moovinOff && !ctx && !general) {
+    // Livetest ohne moovin: keine Bewerberdaten → Platzhalter für den AM, Aktionen werden Aufgaben (keine moovin-Aufrufe)
+    conf = 0.75;
+    switch (intent) {
+      case "unterlagen_nachreichen":
+        if (i.attachments.length) { body = `vielen Dank, wir haben Ihre Unterlagen erhalten (${i.attachments.map((x) => x.filename).join(", ")}) und ordnen sie Ihrer Bewerbung zu.`; act({ type: "dokumente_ablegen", manual: true }); conf = 0.85; }
+        else { body = "vielen Dank für Ihre Nachricht. [AM: Unterlagen angekündigt, aber kein Anhang – bitte prüfen]"; needs = true; reason = "Unterlagen angekündigt, aber keine Anhänge gefunden"; conf = 0.5; }
+        break;
+      case "termin_bestaetigen":
+        body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihre Zusage für den Besichtigungstermin${obj} vermerkt.`; act({ type: "termin_bestaetigen", manual: true }); conf = 0.8; break;
+      case "termin_absage":
+        body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihre Absage für den Besichtigungstermin${obj} vermerkt und geben den Platz frei.`; act({ type: "termin_absagen", manual: true }); conf = 0.8; break;
+      case "termin_verschieben":
+        body = "vielen Dank für Ihre Nachricht. Wir haben Ihren Wunsch, den Termin zu verschieben, an Ihren Ansprechpartner weitergegeben. Er meldet sich mit möglichen Alternativen.";
+        act({ type: "termin_verschieben_wunsch", manual: true, text: i.newMessage.slice(0, 300) }); conf = 0.8; break;
+      case "interesse_bestaetigen":
+        body = "vielen Dank, wir haben Ihr Interesse vermerkt und melden uns, sobald der Eigentümer entschieden hat."; act({ type: "interesse_setzen", interest: "interessiert", manual: true }); conf = 0.85; break;
+      case "rueckzug":
+        body = "vielen Dank für Ihre Rückmeldung. Wir haben vermerkt, dass Sie Ihre Bewerbung zurückziehen. Wir wünschen Ihnen alles Gute bei der Wohnungssuche.";
+        act({ type: "interesse_setzen", interest: "zurueckgezogen", manual: true }); conf = 0.88; break;
+      case "besichtigung_frage":
+        body = `vielen Dank für Ihre Frage${obj}. [AM: Termin und Treffpunkt ergänzen]`; needs = true; reason = "moovin-Anbindung aus: Termin bitte in moovin nachsehen"; break;
+      case "bewerbungsstatus":
+        body = `vielen Dank für Ihre Nachricht${obj}. [AM: Stand der Bewerbung ergänzen]`; needs = true; reason = "moovin-Anbindung aus: Stand bitte in moovin nachsehen"; break;
+      case "objekt_frage": {
+        const hits = await i.tools.searchKnowledge(text);
+        body = hits.length ? `vielen Dank für Ihre Frage. ${hits[0].body}` : `vielen Dank für Ihre Frage${obj}. [AM: bitte beantworten]`;
+        needs = !hits.length; reason = needs ? "Keine passende Info in der Wissensdatenbank" : ""; conf = hits.length ? 0.7 : 0.3; break;
+      }
+      default:
+        body = "vielen Dank für Ihre Nachricht. [AM: bitte beantworten]"; needs = true; reason = "Anliegen nicht eindeutig"; conf = 0.3;
+    }
+  } else if (!ctx && !general) {
     body = "vielen Dank für Ihre Nachricht. Leider können wir Ihre Mailadresse keiner Bewerbung zuordnen. Bitte schreiben Sie uns von der Adresse, mit der Sie sich beworben haben, oder nennen Sie uns Objekt und Namen, unter dem die Bewerbung erfolgt ist.";
     conf = 0.7;
   } else switch (intent) {
