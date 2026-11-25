@@ -70,7 +70,8 @@ Messgröße für die Freischaltung: Anteil Entwürfe, die ein AM mit ≥ 97 % Wo
   `https://<app>/api/auth/google/callback`, Zielgruppe „intern“. `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` setzen.
 - Täglicher Cron (vercel.json, `/api/cron/daily`, `CRON_SECRET`): Hinweise „wartet seit 7 Tagen“, Abwesenheiten, Aufräumen, CRM-Abgleich.
 - CRM-Abgleich (Zoho, nur lesend): Self Client, Scopes `ZohoCRM.coql.READ`, `ZohoCRM.modules.deals.READ`, `ZohoCRM.users.READ`;
-  `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN` (EU-Rechenzentrum voreingestellt). COQL auf Abschlüsse der Pipeline
+  Zugang über „Zoho verbinden“ (Seite Objekte, Lese-Token in `settings.zoho_auth`) oder `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`,
+  `ZOHO_REFRESH_TOKEN` (EU-Rechenzentrum voreingestellt). COQL auf Abschlüsse der Pipeline
   „Vermietung“, Benutzerliste für Name → Adresse. Code: `src/lib/crm/` (Erkennung und Namensabgleich als reine Funktionen getestet).
 - moovin-Anbindung an/aus: `MOOVIN_API_MODE` als Standard, Schalter in der Tabelle `settings` (Admin, Seite „Objekte“) hat Vorrang.
 - Tests: `npm run test:e2e` (lokal, Demo-Modus, Testserver für Google, Brevo und Zoho), `npm run api:check` (Konformität moovin-API).

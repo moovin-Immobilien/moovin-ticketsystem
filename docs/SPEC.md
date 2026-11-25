@@ -143,7 +143,9 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 - Name → Mailadresse über die CRM-Benutzer (gleicher Nachname und passender Vorname, z. B. „Lillyan-Mia Gehlsen“ → „Lilly Gehlsen“);
   mehrdeutig → keine Zuordnung. Nicht auflösbare Namen zeigt die Seite „Objekte“.
 - Abgleich täglich (Cron) und per Knopf (Admin). Zugang: Zoho Self Client mit den Scopes `ZohoCRM.coql.READ`,
-  `ZohoCRM.modules.deals.READ`, `ZohoCRM.users.READ`. Ins CRM wird nie geschrieben.
+  `ZohoCRM.modules.deals.READ`, `ZohoCRM.users.READ`. Einrichten ohne Umweg über Vercel: Admin trägt unter **Objekte** Client ID,
+  Client Secret und den erzeugten Code ein („Zoho verbinden“); das System tauscht ihn gegen einen Lese-Token und speichert ihn
+  serverseitig (`ticket.settings`, nie im Browser oder Audit-Log). Alternativ `ZOHO_*`-Umgebungsvariablen. Ins CRM wird nie geschrieben.
 - Tabelle `ticket.crm_objects`; Objekte, die nicht mehr geliefert werden, bleiben inaktiv erhalten.
 - Stand 25.11.2026: ≈ 3.550 Objekte, davon ≈ 1.330 in Vermarktung; ≈ 64 % per Adresse erkennbar (Stellplätze und Objekte ohne Hausnummer nicht),
   bei ≈ 94 % der erkennbaren Adressen ist der AM eindeutig.
@@ -178,8 +180,8 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 4. Pilot mit 1–2 AMs, danach Umstellung mieter@ und Abschaltung Zoho Desk
 
 ## 7. Offene Punkte
-- Zoho Self Client anlegen (api-console.zoho.eu, Scopes siehe 4.10) und `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN` setzen;
-  danach erster Abgleich per Knopf. Rechenzentrum EU ist voreingestellt (`ZOHO_ACCOUNTS_URL`, `ZOHO_API_BASE`).
+- Zoho verbinden (einmalig, ca. 3 Minuten): api-console.zoho.eu → Self Client → Code mit den Lese-Scopes aus 4.10 erzeugen →
+  unter **Team → Objekte & Zuordnung** eintragen. Rechenzentrum EU ist voreingestellt (`ZOHO_ACCOUNTS_URL`).
 - Google-OAuth-Client (Google Cloud, Workspace moovin.de) anlegen: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` setzen.
   Bis dahin gilt übergangsweise das Prototyp-Passwort; mit Google-Zugangsdaten ist es automatisch abgeschaltet.
 - Brevo einrichten (Tarif klären): Empfangs-Subdomain (z. B. reply.moovin.de, MX auf Brevo), Weiterleitung mieter@ → Subdomain,
