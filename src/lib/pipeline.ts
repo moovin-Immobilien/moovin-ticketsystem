@@ -18,6 +18,9 @@ import { INTENTS, type ActionType } from "./intents";
 import { resolveAppointment } from "./appointments";
 import { copyCorrespondence } from "./correspondence";
 import { effectiveAssignee, taskForAction, addNote } from "./workflow";
+import { moovinEnabled } from "./settings";
+import { recognizeObject } from "./crm/objects";
+import type { ObjectMatch } from "./crm/match";
 
 const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz", "datenschutz_weiterleiten"];
 // Interne Weiterleitung (kein Schreibzugriff auf moovin): auch bei unbekanntem oder nicht verifiziertem Absender erlaubt.
@@ -25,6 +28,10 @@ const WRITE_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", 
 const INTERNAL_ACTIONS: ActionType[] = ["datenschutz_weiterleiten"];
 // Aktionen, die nichts in moovin schreiben (nur Mail aus dem Ticketsystem) → kein bestätigter Absender nötig
 const NO_MOOVIN_WRITE: ActionType[] = ["datenschutz_weiterleiten", "termin_verschieben_wunsch"];
+// moovin-Anbindung aus: diese Aktionen werden nicht an moovin gesendet, sondern als Aufgabe für den AM angelegt
+const MANUAL_ACTIONS: ActionType[] = ["dokumente_ablegen", "termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch", "interesse_setzen", "notiz"];
+// Allgemeine Anliegen ohne Bewerberbezug: dürfen auch ohne moovin-Daten automatisch beantwortet werden (wenn der Intent auf Auto steht)
+const GENERAL_INTENTS = ["wohnungssuche_allgemein", "konto_datenschutz", "technik_login"];
 
 function newMessageId(ticketId: number) {
   return `<ticket-${ticketId}-${randomBytes(6).toString("hex")}@tickets.moovin.de>`;
@@ -124,10 +131,21 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
     return;
   }
 
+  const moovinOn = await moovinEnabled();
   const client = new MoovinClient(ticket.sender_email, ticketId);
   let ctx: ApplicantContext | null = null;
   let moovinError: string | null = null;
-  try { ctx = await client.getApplicantContext(); } catch (e) { moovinError = (e as Error).message; }
+  if (moovinOn) {
+    try { ctx = await client.getApplicantContext(); } catch (e) { moovinError = (e as Error).message; }
+  }
+
+  // Objekt-Erkennung aus dem CRM (moovin-ID oder Adresse in Betreff/Text inkl. Zitat), wenn moovin keinen AM liefert
+  const moovinAm = ctx?.applications.find((a) => a.account_manager_email)?.account_manager_email ?? null;
+  let crm: ObjectMatch | null = null;
+  if (!moovinAm) {
+    const inbound = msgs.filter((m) => m.direction === "in").slice(-5).map((m) => `${m.subject ?? ""}\n${m.body_text ?? ""}`).join("\n");
+    crm = await recognizeObject(inbound).catch(() => null);
+  }
 
   const allowedListings = new Set((ctx?.applications ?? []).map((a) => a.listing_id));
   const objectTitle: string | null = ctx?.applications[0]?.object_title ?? null;
@@ -143,6 +161,8 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
     history: msgs.filter((m) => m.id !== lastIn.id).map((m) => ({ direction: m.direction, text: m.direction === "in" ? stripQuoted(m.body_text) : m.body_text, at: new Date(m.created_at).toISOString() })),
     senderVerified: ticket.sender_verified,
     context: ctx,
+    moovinOff: !moovinOn,
+    crmObject: crm?.object ? { object_id: crm.object.object_id, title: crm.object.title } : null,
     tools: {
       getApplicationStatus: async () => ctx,
       getObjectInfo: async (id) => (allowedListings.has(id) ? client.getListing(id) : null),
@@ -185,6 +205,16 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
       if (!seen.has(a.type)) { seen.add(a.type); valid.push({ ...a, application_id: "", appointment_id: "", interest: "" }); }
       continue;
     }
+    if (!moovinOn) {
+      // Livetest ohne moovin: keine IDs, kein moovin-Aufruf – der AM bekommt nach Freigabe eine Aufgabe
+      if (!MANUAL_ACTIONS.includes(a.type)) continue;
+      if (a.type === "dokumente_ablegen" && !atts.length) continue;
+      if (a.type === "interesse_setzen" && !["interessiert", "zurueckgezogen"].includes(a.interest)) continue;
+      if (seen.has(a.type)) continue;
+      seen.add(a.type);
+      valid.push({ ...a, application_id: "", appointment_id: "", manual: true });
+      continue;
+    }
     if (!ctx) continue;
     if (["termin_bestaetigen", "termin_absagen", "termin_verschieben_wunsch"].includes(a.type)) {
       if (apptResolution.id === null) {
@@ -217,43 +247,65 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
     returning id`;
 
   for (const a of valid) {
-    const blocked = !ticket.sender_verified && !NO_MOOVIN_WRITE.includes(a.type);
+    const blocked = !ticket.sender_verified && !NO_MOOVIN_WRITE.includes(a.type) && !a.manual;
     const label = actionLabel(a, ctx);
     await sql`insert into ticket.actions (ticket_id, draft_id, type, payload, label, status, blocked_reason, idempotency_key)
       values (${ticketId}, ${draft.id}, ${a.type}, ${sql.json(a as never)}, ${label}, ${blocked ? "blockiert" : "vorgeschlagen"},
               ${blocked ? "Absender nicht verifiziert (DKIM/DMARC) – Aktion bitte manuell in moovin prüfen" : null},
-              ${`t${ticketId}-m${lastIn.id}-${a.type}-${a.application_id || a.appointment_id}`})
+              ${`t${ticketId}-m${lastIn.id}-${a.type}-${a.application_id || a.appointment_id || (a.manual ? "manuell" : "")}`})
       on conflict (idempotency_key) do update set status = excluded.status, draft_id = excluded.draft_id, payload = excluded.payload`;
   }
 
   // Objekt/Bewerbung für Anzeige: aus Aktion, sonst erste Bewerbung
   const focusApp = ctx?.applications.find((a) => valid.some((v) => v.application_id === a.id || v.appointment_id === a.appointment?.id)) ?? ctx?.applications[0];
 
-  // Zuständiger AM kommt direkt aus der Bewerbung (kein eigener API-Aufruf); abwesend → Vertretung bzw. Allgemeiner Eingang
-  const amEmail = focusApp?.account_manager_email?.toLowerCase() ?? null;
-  const known = amEmail ? (await sql`select email from ticket.agents where email = ${amEmail} and active`)[0]?.email ?? null : null;
+  // Zuständiger AM: aus der Bewerbung (moovin), sonst aus dem CRM (erkanntes Objekt); abwesend → Vertretung bzw. Allgemeiner Eingang
+  const isAgent = async (email: string | null | undefined) =>
+    email ? ((await sql`select email from ticket.agents where email = ${email.toLowerCase()} and active`)[0]?.email as string | undefined) ?? null : null;
+  const amEmail = (focusApp?.account_manager_email ?? moovinAm)?.toLowerCase() ?? null;
+  const known = await isAgent(amEmail);
+  const crmAgent = !known && crm?.amEmail ? await isAgent(crm.amEmail) : null;
+  let routingSource: string | null = ticket.routing_source ?? null;
+  let routingNote: string | null = null;
+  if (!ticket.assignee_email) {
+    if (known) routingSource = "moovin";
+    else if (crmAgent) routingSource = crm!.how === "moovin_id" ? "crm_id" : "crm_adresse";
+    else {
+      routingSource = null;
+      routingNote = amEmail ? `AM laut moovin (${amEmail}) ist nicht im Ticketsystem freigeschaltet`
+        : crm?.amEmail ? `Objekt ${crm.object?.title ?? crm.candidates[0]?.title ?? ""} gehört laut CRM zu ${crm.amName ?? crm.amEmail} – noch nicht im Ticketsystem freigeschaltet`
+        : crm?.note ? crm.note
+        : !moovinOn ? "Kein Objekt in der Mail erkannt (moovin-Anbindung aus)"
+        : null;
+    }
+  }
   // Bestehende Zuständigkeit bleibt; ist der AM abwesend, übernimmt die Vertretung bzw. der Allgemeine Eingang
-  const eff = await effectiveAssignee(ticket.assignee_email ?? known);
+  const eff = await effectiveAssignee(ticket.assignee_email ?? known ?? crmAgent);
   const assignee = eff.assignee;
   const deputyFor = eff.assignee === ticket.assignee_email && ticket.assignee_email ? ticket.deputy_for : eff.deputyFor;
 
   const [setting] = await sql`select * from ticket.intent_settings where intent = ${r.intent}`;
   const auto =
     !!setting && setting.mode === "auto" && !setting.locked &&
-    r.confidence >= Number(setting.threshold) && !r.needs_human && !!ctx && !!r.reply_text.trim() &&
+    r.confidence >= Number(setting.threshold) && !r.needs_human && !!r.reply_text.trim() && !/\[AM:/.test(r.reply_text) &&
+    (!!ctx || (!moovinOn && GENERAL_INTENTS.includes(r.intent))) && valid.every((a) => !a.manual) &&
     (valid.length === 0 || ticket.sender_verified) && !aiError && !moovinError;
 
   await sql`update ticket.tickets set
       intent = ${r.intent}, language = ${r.language}, confidence = ${r.confidence}, summary = ${r.summary},
       needs_human = ${r.needs_human}, needs_human_reason = ${r.needs_human_reason || null},
       applicant_id = ${ctx?.applicant.id ?? null}, applicant_known = ${!!ctx}, reply_to_email = ${ctx ? ticket.sender_email : null},
-      application_id = ${focusApp?.id ?? null}, object_id = ${focusApp?.listing_id ?? listingId}, object_title = ${focusApp?.object_title ?? objectTitle},
+      application_id = ${focusApp?.id ?? null},
+      object_id = ${focusApp?.listing_id ?? listingId ?? crm?.object?.object_id ?? ticket.object_id},
+      object_title = ${focusApp?.object_title ?? objectTitle ?? crm?.object?.title ?? ticket.object_title},
+      routing_source = ${routingSource}, routing_note = ${assignee ? null : routingNote},
       deputy_for = ${deputyFor},
       assignee_email = ${assignee},
       status = 'entwurf', updated_at = now()
     where id = ${ticketId}`;
 
-  await audit(actor === "system" ? "ki" : actor, "ki_call", { model: out.model, intent: r.intent, confidence: r.confidence, needs_human: r.needs_human, tools: out.toolCalls, usage: out.usage, aiError, auto }, ticketId);
+  await audit(actor === "system" ? "ki" : actor, "ki_call", { model: out.model, intent: r.intent, confidence: r.confidence, needs_human: r.needs_human, tools: out.toolCalls, usage: out.usage, aiError, auto, moovin: moovinOn ? "an" : "aus" }, ticketId);
+  if (crm?.how) await audit("system", "ticket", { event: "objekt_erkannt", how: crm.how, object: crm.object?.object_id ?? null, candidates: crm.candidates.length, am: crm.amEmail, assigned: !!crmAgent && !ticket.assignee_email }, ticketId);
 
   if (auto) {
     const acts = await sql`select id from ticket.actions where draft_id = ${draft.id} and status = 'vorgeschlagen'`;
@@ -267,6 +319,18 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
 }
 
 function actionLabel(a: ProposedAction, ctx: ApplicantContext | null): string {
+  if (a.manual) {
+    const pre = "Aufgabe für den AM (moovin-Anbindung aus): ";
+    switch (a.type) {
+      case "dokumente_ablegen": return `${pre}Anhänge in moovin am Bewerber ablegen`;
+      case "termin_bestaetigen": return `${pre}Teilnahme am Besichtigungstermin in moovin bestätigen`;
+      case "termin_absagen": return `${pre}Besichtigungstermin in moovin absagen und Platz freigeben`;
+      case "termin_verschieben_wunsch": return `Verschiebewunsch per Mail an den AM: „${a.text.slice(0, 120)}“`;
+      case "interesse_setzen": return a.interest === "zurueckgezogen" ? `${pre}Bewerbung in moovin zurückziehen` : `${pre}Interesse in moovin vermerken`;
+      case "notiz": return `${pre}Notiz in moovin eintragen: „${a.text.slice(0, 140)}“`;
+      default: break;
+    }
+  }
   const app = ctx?.applications.find((x) => x.id === a.application_id || x.appointment?.id === a.appointment_id);
   const when = app?.appointment ? new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", dateStyle: "short", timeStyle: "short" }).format(new Date(app.appointment.starts_at)) : "";
   switch (a.type) {
@@ -344,16 +408,19 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
   const [a] = await sql`select a.*, t.sender_email, t.sender_verified, t.applicant_id, t.assignee_email from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
   if (!a) return { id: actionId, ok: false, error: "nicht gefunden" };
   if (a.status !== "vorgeschlagen") return { id: actionId, ok: false, error: `Status ${a.status}` };
-  if (!a.sender_verified && !NO_MOOVIN_WRITE.includes(a.type)) {
+  const p = a.payload as ProposedAction;
+  // Schreibaufrufe an moovin nur für verifizierte Absender; manuelle Aufgaben (moovin-Anbindung aus) prüft der AM selbst
+  if (!a.sender_verified && !NO_MOOVIN_WRITE.includes(a.type) && !p.manual) {
     await sql`update ticket.actions set status = 'blockiert', blocked_reason = 'Absender nicht verifiziert' where id = ${actionId}`;
     return { id: actionId, ok: false, error: "Absender nicht verifiziert" };
   }
-  const p = a.payload as ProposedAction;
   const client = new MoovinClient(a.sender_email, Number(a.ticket_id));
   const src = `T-${a.ticket_id}`;
   try {
     let result: unknown;
-    switch (a.type as ActionType) {
+    // moovin-Anbindung aus: nichts an moovin senden – die Aufgabe für den AM entsteht unten (taskForAction)
+    if (p.manual && a.type !== "termin_verschieben_wunsch") result = { manuell: true };
+    else switch (a.type as ActionType) {
       case "dokumente_ablegen": {
         const [d] = await sql`select in_message_id from ticket.drafts where id = ${a.draft_id}`;
         const files = await sql`select id, filename, content_type, content from ticket.attachments where message_id = ${d.in_message_id}`;
