@@ -12,11 +12,12 @@
                                                    │ 3 Threading (Message-ID / [#T-x] / Absender)│
                                                    │ 4 Nachricht + Anhänge speichern             │
                                                    │ 5 moovin-API: Bewerber-Kontext, AM          │──HMAC──▶ moovin Ticket-API
+                                                   │   sonst/aus: Objekt im Text → AM laut CRM   │◀─täglich, nur lesend── Zoho CRM
                                                    │ 6 Claude: Werkzeuge an Absender gebunden    │◀────────  (Guido)
                                                    │ 7 Aktionen serverseitig validieren          │
                                                    │ 8 Auto-Regel? → senden + Aktionen           │──HMAC──▶ moovin (Schreiben)
                                                    │   sonst → Entwurf für AM                    │
-                                                   └──────────────┬──────────────────────────────┘
+                                                   └──────────────┬─────────────────────────────┘
                                                                   ▼
                                                Postgres (Supabase Frankfurt, Schemas ticket/mock_moovin)
 ```
@@ -39,10 +40,13 @@
 | `tasks` | Aufgaben für AMs (Verschiebewunsch, Rückzug, Interesse, Notiz, nachfassen), offen/erledigt |
 | `notes` | Interne Notizen und Weitergaben – nie an Bewerber, moovin oder KI |
 | `presence` | Wer hat ein Ticket gerade offen (Bearbeitungssperre, nur Anzeige) |
+| `crm_objects` | Spiegel aus Zoho CRM: Objekt (moovin-ID/Adresse) → AM-Name und -Adresse, Phase, „in Vermarktung“; täglicher Abgleich |
+| `settings` | Schalter und Stände, z. B. `moovin_api` (an/aus), `crm_sync` (letzter Abgleich) |
 
 ## Autonomie-Entscheidung
 Auto-Versand nur wenn: Intent-Modus `auto` ∧ nicht gesperrt ∧ Konfidenz ≥ Schwelle ∧ `needs_human = false` ∧
-Absender in moovin bekannt ∧ Antwort nicht leer ∧ (keine Aktionen ∨ Absender verifiziert) ∧ keine KI-/moovin-Fehler.
+Absender in moovin bekannt (bei moovin-Anbindung aus: nur allgemeine Anliegen) ∧ Antwort nicht leer und ohne `[AM: …]` ∧
+keine Aufgaben-Aktionen ∧ (keine Aktionen ∨ Absender verifiziert) ∧ keine KI-/moovin-Fehler.
 Messgröße für die Freischaltung: Anteil Entwürfe, die ein AM mit ≥ 97 % Wortähnlichkeit versendet hat (Ziel ≥ 90 %, min. 20 Fälle).
 
 ## Sicherheit – Verteidigung in Schichten
@@ -64,12 +68,16 @@ Messgröße für die Freischaltung: Anteil Entwürfe, die ein AM mit ≥ 97 % Wo
   - Brevo Versand: `BREVO_API_KEY`, Absenderdomain moovin.de verifizieren (SPF/DKIM). Reply-To = `INBOUND_ADDRESS`.
 - Google-Login: OAuth-Client (Typ Webanwendung) im Google-Cloud-Projekt der Workspace-Organisation, Weiterleitungs-URI
   `https://<app>/api/auth/google/callback`, Zielgruppe „intern“. `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` setzen.
-- Täglicher Cron (vercel.json, `/api/cron/daily`, `CRON_SECRET`): Hinweise „wartet seit 7 Tagen“, Abwesenheiten, Aufräumen.
-- Tests: `npm run test:e2e` (lokal, Demo-Modus, Testserver für Google und Brevo), `npm run api:check` (Konformität moovin-API).
+- Täglicher Cron (vercel.json, `/api/cron/daily`, `CRON_SECRET`): Hinweise „wartet seit 7 Tagen“, Abwesenheiten, Aufräumen, CRM-Abgleich.
+- CRM-Abgleich (Zoho, nur lesend): Self Client, Scopes `ZohoCRM.coql.READ`, `ZohoCRM.modules.deals.READ`, `ZohoCRM.users.READ`;
+  `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN` (EU-Rechenzentrum voreingestellt). COQL auf Abschlüsse der Pipeline
+  „Vermietung“, Benutzerliste für Name → Adresse. Code: `src/lib/crm/` (Erkennung und Namensabgleich als reine Funktionen getestet).
+- moovin-Anbindung an/aus: `MOOVIN_API_MODE` als Standard, Schalter in der Tabelle `settings` (Admin, Seite „Objekte“) hat Vorrang.
+- Tests: `npm run test:e2e` (lokal, Demo-Modus, Testserver für Google, Brevo und Zoho), `npm run api:check` (Konformität moovin-API).
 - Löschkonzept (TODO Pilot): täglicher Job löscht geschlossene Tickets > 6 Monate inkl. Anhänge.
 
 ## Übergabe an IT (Guido)
 1. `docs/moovin-api.openapi.yaml` in app.moovin.de implementieren (Verhalten wie Attrappe `src/app/api/mock-moovin`).
-2. Secret austauschen, `MOOVIN_API_URL` auf echte API setzen.
+2. Secret austauschen, `MOOVIN_API_URL` auf echte API setzen, moovin-Anbindung unter „Objekte“ wieder einschalten.
 3. Attrappe + Schema `mock_moovin` entfernen.
 4. Deep-Link in moovin am Bewerber: `https://<app>/tickets?view=offen&email=<adresse>`.
