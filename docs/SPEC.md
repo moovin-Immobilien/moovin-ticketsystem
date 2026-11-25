@@ -73,7 +73,8 @@ Ticketsystem bearbeitet. Claude beantwortet Anliegen auf Basis einer Wissensdate
 ### 4.4 Autonomie-Logik
 Auto-Versand nur wenn **alle** Bedingungen erfüllt:
 1. Intent steht auf `auto`, 2. Konfidenz ≥ Schwelle (Default 0,85), 3. `needs_human = false`,
-4. Absender in moovin bekannt, 5. bei Schreib-Aktionen: Absender verifiziert (DKIM/DMARC).
+4. Absender in moovin bekannt, 5. bei Schreib-Aktionen: Absender verifiziert (DKIM/DMARC),
+6. kein Signal aus Fall C/D der Ticket-Intelligenz (Anmietwunsch, Vertragsphase, Konkurrenz/Frist, Eskalation, kein Handlungsbedarf, 4.12).
 Sonst: Entwurf → Freigabe-Queue des zuständigen AM.
 
 ### 4.5 Aktionen in moovin
@@ -160,6 +161,31 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 - Antworten gehen an die Absenderadresse (es gibt keine hinterlegte Adresse aus moovin); persönliche Angaben ergänzt der AM nur nach Prüfung in moovin.
 - Auto-Versand nur für allgemeine Anliegen (Wohnungssuche, Datenschutz, Login) und nie mit Platzhalter oder Aufgabe.
 - **An:** Verhalten wie zuvor; das CRM ergänzt nur, wenn moovin keinen AM liefert.
+
+### 4.12 Ticket-Intelligenz: Chancen erkennen, richtig sortieren
+Konzept: `claude/ticket-intelligenz.md` im Projekt. Grundsatz: **Priorisiert wird der Vorgang, nie die Person** (keine Signale zu Einkommen,
+Bonität, Herkunft o. Ä.; unbekannte Werte verwirft der Server).
+- Claude liefert im strukturierten Ergebnis `signals` (feste Werte + Beleg-Zitat + ggf. Frist): `unterlagen_eingegangen`,
+  `zusage_nach_besichtigung`, `vertragsphase`, `konkurrenz_frist`, `termin_bald`, `rueckzug_spaet`, `eskalation`, `kein_handlungsbedarf`.
+  Demo-Modus: Stichwortregeln. Kein zusätzlicher KI-Aufruf.
+- Der Server (`src/lib/signals.ts`) bestätigt mit Daten und setzt die **Stufe** (nie das Modell):
+  - Stufe 1 Abschluss-Chance: Unterlagen nach Besichtigung oder alle fehlenden Unterlagenarten geschickt (Dateinamen ↔ `missing_documents`),
+    Anmietwunsch nach Besichtigung, Vertragsphase (beim Eigentümer/Zusage), Konkurrenzangebot/Frist (aktive Bewerbung).
+  - Stufe 2 zeitkritisch: Termin in < 48 h (Termin aus moovin), Rückzug in später Phase, Eskalation, ≥ 2 Mails ohne Antwort.
+  - Stufe 4: kein Handlungsbedarf (nur ohne Anhang, Aktion und anderes Signal) und System-Benachrichtigungen.
+  - Ohne Bestätigung nur Hinweis (Stufe 3). moovin-Anbindung aus: Signal gilt „laut Mail“ (gestrichelt), Stufe bleibt.
+- Automatisch bearbeitete Tickets: **Fall B** (Unterlagen, Absage < 48 h, später Rückzug) → Auto-Antwort erlaubt, dazu markierte
+  Aufgabe ganz oben („Unterlagen prüfen“, „Slot nachbesetzen“, „Nächsten Kandidaten aktivieren“); bei Freigabe durch den AM wird eine
+  passende Aufgabe hochgestuft. **Fall C** (Anmietwunsch, Vertrag, Frist, Eskalation) → nie automatisch. **Fall D** → kein Entwurf, unten mit
+  „Ohne Antwort schließen“.
+- Sortierung in „Zu erledigen“ und „Offene Aufgaben“: Stufe 1 → Stufe 2 → Überfällige → Fälligkeit → Stufe 4. Farbbalken, Zeile
+  „Warum oben?“ mit Beleg, Zähler/Filter „Chancen“, Karte „Ticket-Intelligenz“ im Ticket mit „Markierung passt nicht“.
+- SLA nach Stufe: Stufe 1 in 2, Stufe 2 in 4 Arbeitsstunden (Mo–Fr 8–18 Uhr); Frist im Text → fällig am Vortag 12 Uhr.
+- Stufe 1/2 entfällt, sobald das Ticket beantwortet oder geschlossen ist.
+- Autonomie-Seite: Trefferquote je Signal (60 Tage) aus „Markierung passt nicht“, Signale abschaltbar (`settings.signals_off`).
+- Dashboard: offene Chancen je AM, Chancen älter als 2 h, Reaktionszeit Stufe 1, Anteil in ≤ 2 h, Chance → Zusage (Status `zusage` bei
+  späterem Kontakt), offene Eskalationen.
+- Daten: Migration 010 (`tickets.priority`, `tickets.signals`, `chance_*`, `tasks.priority`, `signal_feedback`). Keine Änderung an der moovin-API.
 
 ## 5. Sicherheit & Datenschutz
 - Hosting EU (Vercel Region `fra1`, Postgres Frankfurt). AVV mit Anthropic, Zero-Data-Retention anfragen.
