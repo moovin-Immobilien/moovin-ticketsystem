@@ -7,7 +7,9 @@ import type { ApplicantContext } from "@/lib/moovin/types";
 import { StatusBadge, IntentBadge, ConfidenceBar, fmtLong, VerifiedBadge } from "@/components/ui";
 import { DraftPanel } from "./DraftPanel";
 import { Presence } from "./Presence";
-import { takeOverAction, assignAction, addNoteAction, handoverAction, mergeAction, reviewedAction, taskDoneAction } from "./actions";
+import { takeOverAction, assignAction, addNoteAction, handoverAction, mergeAction, reviewedAction, taskDoneAction, signalFeedbackAction } from "./actions";
+import { SIGNAL_INFO, type Signal } from "@/lib/signals";
+import { STAGE_LABEL, markClass } from "@/components/signals";
 import { knownObjects } from "@/lib/objects";
 import { moovinEnabled } from "@/lib/settings";
 import { crmObject } from "@/lib/crm/objects";
@@ -42,6 +44,7 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
   const obj = t.object_id ? await crmObject(t.object_id) : null;
   const ROUTING: Record<string, string> = { moovin: "aus moovin", crm_id: "CRM (moovin-ID in der Mail)", crm_adresse: "CRM (Adresse in der Mail)", manuell: "manuell zugeordnet" };
 
+  const signals = (t.signals ?? []) as Signal[];
   const analysis = (draft?.analysis ?? {}) as { summary?: string; needs_human_reason?: string; toolCalls?: string[]; aiError?: string; awaits_reply?: boolean };
   const isOpen = !["beantwortet", "geschlossen", "wartet"].includes(t.status);
   const draftEditable = !!draft && draft.status === "offen" && isOpen;
@@ -153,6 +156,29 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
 
         {/* Kontext aus moovin */}
         <aside className="space-y-4">
+          {(signals.length > 0 || Number(t.priority) !== 3) && (
+            <section className={`card p-4 space-y-2 ${markClass(t.priority, signals)}`} data-testid="signals-card">
+              <h2 className="font-semibold text-navy">Ticket-Intelligenz <span className="text-xs font-normal text-muted">– Stufe {String(t.priority)}: {STAGE_LABEL[Number(t.priority)]}</span></h2>
+              <ul className="space-y-2 text-sm">
+                {signals.map((s) => (
+                  <li key={s.type}>
+                    <div className="font-medium text-ink">{SIGNAL_INFO[s.type]?.label ?? s.type}
+                      <span className="ml-2 text-xs font-normal text-muted">{s.confirmed && s.basis === "daten" ? "bestätigt durch Daten" : s.basis === "mail" && !s.confirmed ? "laut Mail" : "aus der Mail"}{s.stage === 3 ? " · nur Hinweis" : ""}</span>
+                    </div>
+                    <div className="text-xs text-muted">{s.why}{s.evidence ? <> · „{s.evidence}“</> : null}</div>
+                  </li>
+                ))}
+              </ul>
+              {signals.length > 0 && (
+                <form action={signalFeedbackAction.bind(null, ticketId)} className="flex gap-2 pt-1" data-testid="signal-feedback">
+                  <select name="signal" className="input text-xs" defaultValue={signals[0].type}>
+                    {signals.map((s) => <option key={s.type} value={s.type}>{SIGNAL_INFO[s.type]?.label ?? s.type}</option>)}
+                  </select>
+                  <button className="btn-ghost whitespace-nowrap text-xs">Markierung passt nicht</button>
+                </form>
+              )}
+            </section>
+          )}
           <section className="card p-4 space-y-3" data-testid="notes">
             <h2 className="font-semibold text-navy">Intern <span className="text-xs font-normal text-muted">– nie an Bewerber, moovin oder KI</span></h2>
             {notes.length === 0 && <p className="text-xs text-muted">Noch keine internen Notizen.</p>}
