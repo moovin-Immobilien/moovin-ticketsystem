@@ -3,6 +3,7 @@ import { sql } from "./db";
 import { env } from "./env";
 import { audit } from "./audit";
 import { MoovinClient } from "./moovin/client";
+import { moovinEnabled } from "./settings";
 
 /**
  * Option: Kopie von Bewerber-Mail(s) und unserer Antwort im Bewerber in moovin ablegen,
@@ -12,6 +13,7 @@ import { MoovinClient } from "./moovin/client";
  */
 export async function copyCorrespondence(ticketId: number): Promise<{ ok: boolean; stored?: number; error?: string; skipped?: string }> {
   if (!env.copyCorrespondence()) return { ok: true, skipped: "deaktiviert" };
+  if (!(await moovinEnabled())) return { ok: true, skipped: "moovin-Anbindung aus" };
   const [t] = await sql`select id, sender_email, applicant_id, application_id from ticket.tickets where id = ${ticketId}`;
   if (!t?.applicant_id) return { ok: true, skipped: "Bewerber in moovin unbekannt" };
   const msgs = await sql`select id, direction, from_email, to_email, subject, body_text, sender_verified, sent_by, created_at

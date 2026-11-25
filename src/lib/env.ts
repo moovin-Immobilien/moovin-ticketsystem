@@ -44,7 +44,17 @@ export const env = {
   prototypePassword: () => process.env.PROTOTYPE_PASSWORD ?? "",
   // Vercel Cron (Authorization: Bearer <CRON_SECRET>)
   cronSecret: () => process.env.CRON_SECRET ?? "",
+  // moovin-Anbindung: Standard „an“; „aus“ = Livetest ohne moovin-API (Schalter unter Objekte überschreibt das)
+  moovinApiModeDefault: (): "an" | "aus" => (process.env.MOOVIN_API_MODE === "aus" ? "aus" : "an"),
+  // Zoho CRM (nur lesend: Objekt → AM). Self Client mit Scopes ZohoCRM.coql.READ, ZohoCRM.modules.deals.READ, ZohoCRM.users.READ
+  zohoClientId: () => process.env.ZOHO_CLIENT_ID ?? "",
+  zohoClientSecret: () => process.env.ZOHO_CLIENT_SECRET ?? "",
+  zohoRefreshToken: () => process.env.ZOHO_REFRESH_TOKEN ?? "",
+  zohoAccountsUrl: () => (process.env.NODE_ENV !== "production" && process.env.ZOHO_TEST_BASE) || process.env.ZOHO_ACCOUNTS_URL || "https://accounts.zoho.eu",
+  zohoApiBase: () => (process.env.NODE_ENV !== "production" && process.env.ZOHO_TEST_BASE) || process.env.ZOHO_API_BASE || "https://www.zohoapis.eu",
 };
+
+export const zohoConfigured = () => !!env.zohoClientId() && !!env.zohoClientSecret() && !!env.zohoRefreshToken();
 
 export const googleLoginEnabled = () => !!env.googleClientId() && !!env.googleClientSecret();
 export const passwordLoginEnabled = () => !googleLoginEnabled() && !!env.prototypePassword();

@@ -44,13 +44,17 @@ export async function createTask(t: { ticketId: number; type: TaskType; text: st
 }
 
 /** Nach erfolgreicher Aktion: Aufgabe für den AM, wenn er in moovin etwas tun muss. */
-export async function taskForAction(a: { id: number; ticket_id: number; type: string; payload: { interest?: string; text?: string }; label: string | null; assignee_email: string | null }) {
+export async function taskForAction(a: { id: number; ticket_id: number; type: string; payload: { interest?: string; text?: string; manual?: boolean }; label: string | null; assignee_email: string | null }) {
   let type: TaskType | null = null;
   let text = "";
+  const manual = !!a.payload.manual; // moovin-Anbindung aus: der AM trägt es selbst in moovin ein
   if (a.type === "termin_verschieben_wunsch") { type = "verschiebewunsch"; text = `Neuen Termin anbieten: ${a.label ?? ""}`; }
   else if (a.type === "interesse_setzen" && a.payload.interest === "zurueckgezogen") { type = "rueckzug"; text = "Bewerbung in moovin zurückziehen (Bewerber hat per Mail zurückgezogen)"; }
   else if (a.type === "interesse_setzen") { type = "interesse"; text = "Interesse des Bewerbers in moovin vermerken"; }
-  else if (a.type === "notiz") { type = "notiz"; text = `Notiz in moovin prüfen: ${String(a.payload.text ?? "").slice(0, 300)}`; }
+  else if (a.type === "notiz") { type = "notiz"; text = `${manual ? "Notiz in moovin eintragen" : "Notiz in moovin prüfen"}: ${String(a.payload.text ?? "").slice(0, 300)}`; }
+  else if (manual && a.type === "dokumente_ablegen") { type = "manuell"; text = "Anhänge aus dem Ticket in moovin am Bewerber ablegen"; }
+  else if (manual && a.type === "termin_bestaetigen") { type = "manuell"; text = "Teilnahme am Besichtigungstermin in moovin bestätigen"; }
+  else if (manual && a.type === "termin_absagen") { type = "manuell"; text = "Besichtigungstermin in moovin absagen und Platz freigeben"; }
   if (!type) return null;
   return createTask({ ticketId: a.ticket_id, type, text, assignee: a.assignee_email, actionId: a.id });
 }

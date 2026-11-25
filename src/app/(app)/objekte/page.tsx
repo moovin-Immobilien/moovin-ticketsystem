@@ -1,0 +1,119 @@
+import Link from "next/link";
+import { sql } from "@/lib/db";
+import { requireAdmin } from "@/lib/auth";
+import { zohoConfigured } from "@/lib/env";
+import { getSetting, moovinEnabled } from "@/lib/settings";
+import type { CrmSyncResult } from "@/lib/crm/zoho";
+import { fmtLong } from "@/components/ui";
+import { setMoovinModeAction, syncCrmAction } from "./actions";
+import { addAgentAction } from "../team/actions";
+
+/** Objekte & Zuordnung (Admin): moovin-Anbindung an/aus, CRM-Abgleich Objekt → AM, AMs laut CRM, Objektsuche. */
+export default async function Objekte(props: PageProps<"/objekte">) {
+  await requireAdmin();
+  const sp = await props.searchParams;
+  const q = typeof sp.q === "string" ? sp.q.trim() : "";
+  const moovinOn = await moovinEnabled();
+  const sync = await getSetting<CrmSyncResult>("crm_sync");
+  const [stats] = await sql`select count(*) filter (where active) as active, count(*) filter (where active and live) as live,
+      count(*) filter (where active and am_email is not null) as with_am, count(*) filter (where active and match_key is not null) as with_key
+    from ticket.crm_objects`;
+  const ams = await sql`select o.am_name, o.am_email, count(*) filter (where o.live) as live, count(*) as total, a.active as agent_active, a.name as agent_name
+    from ticket.crm_objects o left join ticket.agents a on a.email = o.am_email
+    where o.active and o.am_name is not null group by o.am_name, o.am_email, a.active, a.name order by count(*) filter (where o.live) desc, o.am_name`;
+  const like = `%${q}%`;
+  const found = q ? await sql`select * from ticket.crm_objects where active and (object_id ilike ${like} or title ilike ${like} or am_name ilike ${like} or customer ilike ${like})
+                              order by live desc, title limit 50` : [];
+  const [routing] = await sql`select count(*) filter (where routing_source = 'crm_id') as crm_id, count(*) filter (where routing_source = 'crm_adresse') as crm_adresse,
+      count(*) filter (where routing_source = 'moovin') as moovin, count(*) filter (where routing_source = 'manuell') as manuell,
+      count(*) filter (where assignee_email is null and status not in ('beantwortet','geschlossen') and merged_into is null) as pool
+    from ticket.tickets where created_at > now() - interval '30 days'`;
+
+  return (
+    <div className="space-y-6" data-testid="objekte">
+      <div className="flex items-baseline justify-between">
+        <h1 className="text-xl font-semibold text-navy">Objekte & Zuordnung</h1>
+        <Link href="/team" className="text-sm text-muted hover:text-navy">Team →</Link>
+      </div>
+
+      <section className="card p-5 space-y-3" data-testid="moovin-mode">
+        <h2 className="font-semibold text-navy">moovin-Anbindung: {moovinOn ? "an" : "aus (Livetest)"}</h2>
+        <p className="text-sm text-muted max-w-3xl">
+          {moovinOn
+            ? "Das System fragt Bewerber, Bewerbungen und Termine bei moovin ab und führt freigegebene Aktionen dort aus."
+            : "Ohne moovin-API: keine Abfragen und keine Schreibaufrufe an moovin. Der AM kommt aus dem CRM (Objekt in der Mail erkannt), die KI setzt [AM: …]-Platzhalter für persönliche Angaben, vorgeschlagene Aktionen werden nach der Freigabe zu Aufgaben."}
+        </p>
+        <form action={setMoovinModeAction.bind(null, !moovinOn)}>
+          <button className={moovinOn ? "btn-ghost" : "btn-pink"}>{moovinOn ? "moovin-Anbindung ausschalten (Livetest)" : "moovin-Anbindung einschalten"}</button>
+        </form>
+      </section>
+
+      <section className="card p-5 space-y-3" data-testid="crm-sync">
+        <h2 className="font-semibold text-navy">CRM-Abgleich (Zoho, nur lesend)</h2>
+        <p className="text-sm text-muted max-w-3xl">Quelle: Abschlüsse der Pipeline „Vermietung“ (offen und bis 60 Tage nach Abschluss) mit moovin-ID, Adresse und „Zuständiger Account Manager“. Täglich automatisch; ins CRM wird nichts geschrieben.</p>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+          <div><div className="text-muted text-xs">Objekte</div><div className="text-lg font-semibold tabular-nums" data-testid="crm-count">{Number(stats.active)}</div></div>
+          <div><div className="text-muted text-xs">davon in Vermarktung</div><div className="text-lg font-semibold tabular-nums">{Number(stats.live)}</div></div>
+          <div><div className="text-muted text-xs">mit AM-Adresse</div><div className="text-lg font-semibold tabular-nums">{Number(stats.with_am)}</div></div>
+          <div><div className="text-muted text-xs">per Adresse erkennbar</div><div className="text-lg font-semibold tabular-nums">{Number(stats.with_key)}</div></div>
+          <div><div className="text-muted text-xs">Letzter Abgleich</div><div className={sync && !sync.ok ? "text-pink" : ""}>{sync ? `${fmtLong(sync.at)}${sync.ok ? "" : " – Fehler"}` : "noch nie"}</div></div>
+        </div>
+        {sync?.error && <p className="text-sm text-pink">{sync.error}</p>}
+        {sync?.unresolved?.length ? <p className="text-sm text-amber-700">AM-Namen ohne eindeutige CRM-Adresse: {sync.unresolved.join(", ")}</p> : null}
+        <form action={syncCrmAction}>
+          <button className="btn-ghost" disabled={!zohoConfigured()}>Jetzt abgleichen</button>
+          {!zohoConfigured() && <span className="ml-3 text-xs text-muted">Zoho-Zugang fehlt: ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, ZOHO_REFRESH_TOKEN (Self Client, Scopes ZohoCRM.coql.READ, ZohoCRM.modules.deals.READ, ZohoCRM.users.READ).</span>}
+        </form>
+        <p className="text-xs text-muted">Zuordnung der letzten 30 Tage: CRM per moovin-ID {Number(routing.crm_id)} · CRM per Adresse {Number(routing.crm_adresse)} · moovin {Number(routing.moovin)} · manuell {Number(routing.manuell)} · aktuell im Allgemeinen Eingang {Number(routing.pool)}</p>
+      </section>
+
+      <section className="card overflow-hidden" data-testid="crm-ams">
+        <div className="px-5 pt-4 pb-2"><h2 className="font-semibold text-navy">AMs laut CRM</h2>
+          <p className="text-xs text-muted">Tickets gehen nur an AMs, die im Ticketsystem freigeschaltet sind; die übrigen landen mit Hinweis im Allgemeinen Eingang.</p></div>
+        <table className="w-full text-sm">
+          <thead className="bg-canvas text-left text-xs uppercase tracking-wide text-muted">
+            <tr><th className="px-4 py-2">AM (CRM)</th><th className="px-4 py-2">Adresse</th><th className="px-4 py-2">in Vermarktung</th><th className="px-4 py-2">Objekte</th><th className="px-4 py-2">Ticketsystem</th></tr>
+          </thead>
+          <tbody>
+            {ams.length === 0 && <tr><td colSpan={5} className="px-4 py-6 text-center text-muted">Noch kein Abgleich.</td></tr>}
+            {ams.map((a) => (
+              <tr key={`${a.am_name}-${a.am_email}`} className="border-t border-line">
+                <td className="px-4 py-2">{a.am_name}</td>
+                <td className="px-4 py-2 text-muted">{a.am_email ?? <span className="text-amber-700">nicht zuordenbar</span>}</td>
+                <td className="px-4 py-2 tabular-nums">{Number(a.live)}</td>
+                <td className="px-4 py-2 tabular-nums">{Number(a.total)}</td>
+                <td className="px-4 py-2">
+                  {a.agent_active ? <span className="badge bg-emerald-50 text-emerald-700">freigeschaltet</span>
+                    : a.am_email ? (
+                      <form action={addAgentAction}>
+                        <input type="hidden" name="email" value={a.am_email} /><input type="hidden" name="name" value={a.agent_name ?? a.am_name} />
+                        <button className="btn-ghost text-xs">Freischalten</button>
+                      </form>
+                    ) : "–"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="card p-5 space-y-3">
+        <h2 className="font-semibold text-navy">Objekt suchen</h2>
+        <form className="flex gap-2"><input name="q" defaultValue={q} placeholder="moovin-ID, Adresse, AM oder Kunde" className="input w-96" /><button className="btn-ghost">Suchen</button></form>
+        {q && (
+          <table className="w-full text-sm" data-testid="crm-search">
+            <tbody>
+              {found.length === 0 && <tr><td className="py-2 text-muted">Kein Treffer.</td></tr>}
+              {found.map((o) => (
+                <tr key={o.object_id} className="border-t border-line">
+                  <td className="py-2 pr-3 tabular-nums">{o.object_id}</td><td className="py-2 pr-3">{o.title}</td>
+                  <td className="py-2 pr-3 text-muted">{o.stage}</td><td className="py-2 pr-3">{o.am_name ?? "–"}</td><td className="py-2 text-muted">{o.customer}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </div>
+  );
+}
