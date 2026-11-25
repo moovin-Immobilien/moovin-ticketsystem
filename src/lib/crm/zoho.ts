@@ -137,7 +137,8 @@ export async function syncCrmObjects(actor = "system"): Promise<CrmSyncResult> {
     const token = await accessToken(auth);
     const since = new Date(Date.now() - RECENT_CLOSED_DAYS * 86_400_000).toISOString().replace(/\.\d{3}Z$/, "+00:00");
     const open = await coqlAll(api, token, `Pipeline = 'Vermietung' and Stage not in (${CLOSED_STAGES.map(q).join(", ")})`);
-    const recent = await coqlAll(api, token, `Pipeline = 'Vermietung' and Stage in (${q("abgeschlossen (gewonnen)")}, ${q("Rechnungserstellung")}) and Modified_Time >= '${since}'`);
+    // COQL: mehr als zwei Bedingungen nur mit Klammern
+    const recent = await coqlAll(api, token, `(Pipeline = 'Vermietung' and Stage in (${q("abgeschlossen (gewonnen)")}, ${q("Rechnungserstellung")})) and Modified_Time >= '${since}'`);
     const users = await crmUsers(api, token);
 
     // Eine Zeile je Objekt; bei doppelter moovin-ID gewinnt das Objekt in Vermarktung bzw. das zuletzt geänderte
