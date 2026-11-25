@@ -30,6 +30,24 @@ export default async function Dashboard() {
   const tasks = await sql`select coalesce(a.name, 'Allgemeiner Eingang') as name, count(*) filter (where k.status = 'offen') as offen,
       count(*) filter (where k.status = 'offen' and k.due_at < now()) as ueberfaellig
     from ticket.tasks k left join ticket.agents a on a.email = k.assignee_email group by 1 having count(*) filter (where k.status = 'offen') > 0 order by 2 desc`;
+  // Ticket-Intelligenz: offene Chancen (Stufe 1) je AM, Chancen älter als 2 h, Reaktionszeit Stufe 1, Chance → Zusage
+  const chances = await sql`select coalesce(a.name, 'Allgemeiner Eingang') as name,
+      count(*) as offen, count(*) filter (where x.since < now() - interval '2 hours') as alt
+    from (select t.assignee_email, t.chance_at as since from ticket.tickets t
+            where t.priority = 1 and t.status in ('neu','in_bearbeitung','entwurf') and t.merged_into is null
+          union all
+          select k.assignee_email, k.created_at from ticket.tasks k where k.priority = 1 and k.status = 'offen') x
+    left join ticket.agents a on a.email = x.assignee_email group by 1 order by 2 desc`;
+  const [ch] = await sql`select
+      percentile_cont(0.5) within group (order by extract(epoch from chance_answered_at - chance_at) / 60) filter (where chance_answered_at is not null) as median,
+      percentile_cont(0.9) within group (order by extract(epoch from chance_answered_at - chance_at) / 60) filter (where chance_answered_at is not null) as p90,
+      count(*) as n, count(*) filter (where chance_won_at is not null) as won,
+      count(*) filter (where chance_answered_at is not null and chance_answered_at - chance_at <= interval '2 hours') as fast
+    from ticket.tickets where chance_at > now() - interval '30 days'`;
+  const [esc] = await sql`select count(*) as n from ticket.tickets where status not in ('beantwortet','geschlossen') and merged_into is null
+    and signals @> '[{"type":"eskalation"}]'::jsonb`;
+  const openChances = chances.reduce((n, c) => n + Number(c.offen), 0);
+  const oldChances = chances.reduce((n, c) => n + Number(c.alt), 0);
   const maxDay = Math.max(1, ...perDay.map((d) => Number(d.n)));
   const maxWeek = Math.max(1, ...perWeek.map((d) => Number(d.n)));
   const min = (v: unknown) => (v === null || v === undefined ? "–" : Number(v) < 120 ? `${Math.round(Number(v))} min` : `${(Number(v) / 60).toFixed(1)} h`);
@@ -44,6 +62,15 @@ export default async function Dashboard() {
         <Kpi label="Allgemeiner Eingang" value={st.eingang} />
         <Kpi label="Erste Antwort (Median, 30 T.)" value={min(rt.median)} />
         <Kpi label="Erste Antwort (90 %, 30 T.)" value={min(rt.p90)} />
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3" data-testid="chancen-kpis">
+        <Kpi label="Offene Chancen" value={openChances} />
+        <Kpi label="Chancen älter als 2 h" value={oldChances} warn={oldChances > 0} />
+        <Kpi label="Reaktion Stufe 1 (Median, 30 T.)" value={min(ch.median)} />
+        <Kpi label="Stufe 1 in ≤ 2 h bearbeitet" value={Number(ch.n) ? `${Math.round((Number(ch.fast) / Number(ch.n)) * 100)} %` : "–"} />
+        <Kpi label="Chance → Zusage (30 T.)" value={`${String(ch.won)} / ${String(ch.n)}`} />
+        <Kpi label="Eskalationen offen" value={esc.n} warn={Number(esc.n) > 0} />
       </div>
 
       <div className="grid md:grid-cols-2 gap-5">
@@ -67,6 +94,20 @@ export default async function Dashboard() {
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        </section>
+        <section className="card p-4">
+          <h2 className="font-semibold text-navy mb-3">Offene Chancen je AM</h2>
+          <table className="w-full text-sm">
+            <tbody>
+              {chances.length === 0 && <tr><td className="text-muted py-4">Keine offenen Abschluss-Chancen.</td></tr>}
+              {chances.map((c) => (
+                <tr key={c.name} className="border-t border-line first:border-t-0">
+                  <td className="py-2">{c.name}</td>
+                  <td className="py-2 text-right tabular-nums">{String(c.offen)}{Number(c.alt) > 0 && <span className="text-pink"> ({String(c.alt)} älter als 2 h)</span>}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </section>
