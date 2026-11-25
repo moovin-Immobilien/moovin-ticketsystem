@@ -7,6 +7,8 @@ export type ProposedAction = {
   appointment_id: string;
   interest: "interessiert" | "zurueckgezogen" | "";
   text: string;
+  /** moovin-Anbindung aus: kein Aufruf an moovin, der AM erledigt es (Aufgabe) */
+  manual?: boolean;
 };
 
 export type AgentResult = {
@@ -32,6 +34,10 @@ export type AgentInput = {
   history: { direction: "in" | "out"; text: string; at: string }[];
   senderVerified: boolean;
   context: ApplicantContext | null; // nur für Demo-Modus/Validierung; Claude bekommt Daten ausschließlich über Werkzeuge
+  /** moovin-Anbindung aus (Livetest): keine Bewerberdaten, keine moovin-Werkzeuge */
+  moovinOff?: boolean;
+  /** Objekt laut CRM, aus der Mail erkannt (nur Titel/Adresse – keine internen Daten) */
+  crmObject?: { object_id: string; title: string | null } | null;
   tools: {
     getApplicationStatus: () => Promise<ApplicantContext | null>;
     getObjectInfo: (listingId: string) => Promise<Listing | null>;
