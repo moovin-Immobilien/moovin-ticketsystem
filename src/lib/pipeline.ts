@@ -7,7 +7,7 @@ import { MoovinClient } from "./moovin/client";
 import type { ApplicantContext } from "./moovin/types";
 import { isSenderVerified } from "./inbound/dkim";
 import { stripQuoted, type InboundMail } from "./inbound/parse";
-import { dueDate } from "./sla";
+import { dueDate, addWorkingHours, dueBeforeDeadline } from "./sla";
 import { searchKnowledge } from "./knowledge";
 import { runClaudeAgent } from "./ai/claude";
 import { runDemoAgent } from "./ai/demo";
@@ -17,8 +17,9 @@ import { similarity, UNCHANGED_THRESHOLD } from "./similarity";
 import { INTENTS, type ActionType } from "./intents";
 import { resolveAppointment } from "./appointments";
 import { copyCorrespondence } from "./correspondence";
-import { effectiveAssignee, taskForAction, addNote } from "./workflow";
-import { moovinEnabled } from "./settings";
+import { effectiveAssignee, taskForAction, addNote, signalTasks } from "./workflow";
+import { moovinEnabled, getSetting } from "./settings";
+import { evaluateSignals, type Signal } from "./signals";
 import { recognizeObject } from "./crm/objects";
 import type { ObjectMatch } from "./crm/match";
 
@@ -39,6 +40,8 @@ function newMessageId(ticketId: number) {
 
 // System-/interne Absender (Auswertung Zoho-Desk-Export: ~18 % der Tickets) → keine KI, direkt an Menschen
 const SYSTEM_SENDER = /^(no-?reply|noreply|mailer-daemon|postmaster|bounce)[^@]*@|@(moovin\.de|moovinimmobilien\.zohodesk\.com)$|@immobilienscout24\.de$/i;
+// Reine Benachrichtigungen (keine Kolleginnen/Kollegen) → Stufe 4 „Kein Handlungsbedarf“
+const SYSTEM_NOTICE = /^(no-?reply|noreply|mailer-daemon|postmaster|bounce)[^@]*@|@immobilienscout24\.de$/i;
 
 function trustedAuthServ(): string[] {
   return (process.env.TRUSTED_AUTHSERV_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -125,8 +128,11 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
   const atts = await sql`select filename, content_type from ticket.attachments where message_id = ${lastIn.id}`;
 
   if (SYSTEM_SENDER.test(ticket.sender_email)) {
+    const notice = SYSTEM_NOTICE.test(ticket.sender_email);
+    const ev = evaluateSignals({ raw: [], intent: "intern_system", attachments: [], ctx: null, moovinOn: true, unansweredInbound: 0, actionCount: 0, systemNotice: notice });
     await sql`update ticket.tickets set intent = 'intern_system', confidence = null, summary = 'System- oder interne Absenderadresse – keine KI-Verarbeitung.',
-              needs_human = true, needs_human_reason = 'System-/interne Mail', status = 'neu', updated_at = now() where id = ${ticketId}`;
+              needs_human = true, needs_human_reason = 'System-/interne Mail', status = 'neu', priority = ${ev.priority}, signals = ${sql.json(ev.signals as never)},
+              updated_at = now() where id = ${ticketId}`;
     await audit("system", "ticket", { event: "system_absender_uebersprungen" }, ticketId);
     return;
   }
@@ -239,6 +245,18 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
     valid.push(a);
   }
 
+  // Ticket-Intelligenz: Signale bestätigen, Stufe setzen (der Server entscheidet, nie das Modell)
+  const lastOutAt = Math.max(0, ...msgs.filter((m) => m.direction === "out").map((m) => new Date(m.created_at).getTime()));
+  const unanswered = msgs.filter((m) => m.direction === "in" && new Date(m.created_at).getTime() > lastOutAt).length;
+  const rejected = (await sql`select signal from ticket.signal_feedback where ticket_id = ${ticketId}`).map((x) => String(x.signal));
+  const disabled = (await getSetting<string[]>("signals_off").catch(() => null)) ?? [];
+  const ev = evaluateSignals({ raw: r.signals ?? [], intent: r.intent, attachments: atts.map((a) => ({ filename: a.filename })), ctx, moovinOn,
+    unansweredInbound: unanswered, actionCount: valid.length, disabled, rejected });
+  const received = new Date(lastIn.created_at);
+  let signalDue: Date | null = ev.priority === 1 ? addWorkingHours(received, 2) : ev.priority === 2 ? addWorkingHours(received, 4) : null;
+  const deadlineDue = ev.deadline ? dueBeforeDeadline(ev.deadline) : null;
+  if (deadlineDue && (!signalDue || deadlineDue < signalDue)) signalDue = deadlineDue;
+
   await sql`update ticket.drafts set status = 'ersetzt' where ticket_id = ${ticketId} and status = 'offen'`;
   await sql`update ticket.actions set status = 'verworfen' where ticket_id = ${ticketId} and status in ('vorgeschlagen','blockiert')`;
 
@@ -289,7 +307,7 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
     !!setting && setting.mode === "auto" && !setting.locked &&
     r.confidence >= Number(setting.threshold) && !r.needs_human && !!r.reply_text.trim() && !/\[AM:/.test(r.reply_text) &&
     (!!ctx || (!moovinOn && GENERAL_INTENTS.includes(r.intent))) && valid.every((a) => !a.manual) &&
-    (valid.length === 0 || ticket.sender_verified) && !aiError && !moovinError;
+    (valid.length === 0 || ticket.sender_verified) && !aiError && !moovinError && !ev.autoBlocked;
 
   await sql`update ticket.tickets set
       intent = ${r.intent}, language = ${r.language}, confidence = ${r.confidence}, summary = ${r.summary},
@@ -301,8 +319,13 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
       routing_source = ${routingSource}, routing_note = ${assignee ? null : routingNote},
       deputy_for = ${deputyFor},
       assignee_email = ${assignee},
+      priority = ${ev.priority}, signals = ${sql.json(ev.signals as never)},
+      due_at = case when ${signalDue}::timestamptz is not null and (due_at is null or due_at > ${signalDue}::timestamptz) then ${signalDue}::timestamptz else due_at end,
+      chance_at = case when ${ev.priority} = 1 then coalesce(chance_at, now()) else chance_at end,
+      chance_won_at = case when chance_at is not null and chance_won_at is null and ${!!ctx?.applications.some((a) => a.status === "zusage")} then now() else chance_won_at end,
       status = 'entwurf', updated_at = now()
     where id = ${ticketId}`;
+  if (ev.signals.length) await audit("system", "ticket", { event: "signale", priority: ev.priority, signals: ev.signals.map((x: Signal) => ({ type: x.type, stage: x.stage, basis: x.basis })), autoBlocked: ev.autoBlocked }, ticketId);
 
   await audit(actor === "system" ? "ki" : actor, "ki_call", { model: out.model, intent: r.intent, confidence: r.confidence, needs_human: r.needs_human, tools: out.toolCalls, usage: out.usage, aiError, auto, moovin: moovinOn ? "an" : "aus" }, ticketId);
   if (crm?.how) await audit("system", "ticket", { event: "objekt_erkannt", how: crm.how, object: crm.object?.object_id ?? null, candidates: crm.candidates.length, am: crm.amEmail, assigned: !!crmAgent && !ticket.assignee_email }, ticketId);
@@ -394,8 +417,13 @@ export async function sendDraft(opts: { ticketId: number; draftId: number; actor
     results.push(await executeAction(Number(a.id), actor));
   }
 
+  // Fall B: Antwort ist raus, die Arbeit bleibt → markierte Aufgabe (bei Auto-Antwort neu, sonst bestehende Aufgabe hochstufen)
+  await signalTasks(ticketId, actor === "ki");
+
   const wait = !!opts.awaitReply;
   await sql`update ticket.tickets set status = ${wait ? "wartet" : "beantwortet"}, auto_handled = ${actor === "ki"},
+            priority = case when priority in (1, 2) then 3 else priority end,
+            chance_answered_at = case when chance_at is not null then coalesce(chance_answered_at, now()) else chance_answered_at end,
             waiting_since = ${wait ? new Date() : null}, waiting_reminded_at = null, due_at = case when ${wait} then null else due_at end,
             first_response_at = coalesce(first_response_at, now()), updated_at = now() where id = ${ticketId}`;
   // Option: Kopie von Mail und Antwort im Bewerber in moovin (blockiert den Versand nie)
@@ -504,6 +532,7 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
 export async function closeTicket(ticketId: number, actor: string) {
   await sql`update ticket.drafts set status = 'verworfen', decided_by = ${actor}, decided_at = now() where ticket_id = ${ticketId} and status = 'offen'`;
   await sql`update ticket.actions set status = 'verworfen' where ticket_id = ${ticketId} and status in ('vorgeschlagen','blockiert')`;
-  await sql`update ticket.tickets set status = 'geschlossen', closed_at = now(), updated_at = now() where id = ${ticketId}`;
+  await sql`update ticket.tickets set status = 'geschlossen', closed_at = now(), priority = case when priority in (1, 2) then 3 else priority end,
+            updated_at = now() where id = ${ticketId}`;
   await audit(actor, "ticket", { event: "geschlossen" }, ticketId);
 }
