@@ -98,7 +98,14 @@ function startMock(): Promise<Server> {
     if (url.pathname === "/zoho/oauth/v2/token" && req.method === "POST") {
       const f = new URLSearchParams(body);
       zoho.calls.push("token");
-      if (f.get("client_secret") !== "e2e-zoho-secret" || f.get("refresh_token") !== "e2e-zoho-refresh" || f.get("grant_type") !== "refresh_token") { res.writeHead(400, { "Content-Type": "application/json" }).end('{"error":"invalid_client"}'); return; }
+      if (f.get("client_id") !== "e2e-zoho" || f.get("client_secret") !== "e2e-zoho-secret") { res.writeHead(400, { "Content-Type": "application/json" }).end('{"error":"invalid_client"}'); return; }
+      if (f.get("grant_type") === "authorization_code") {
+        if (f.get("code") !== "1000.e2e-grant") { res.writeHead(200, { "Content-Type": "application/json" }).end('{"error":"invalid_code"}'); return; }
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ access_token: "zt-1", refresh_token: "e2e-zoho-refresh", api_domain: "https://www.zohoapis.eu",
+          scope: "ZohoCRM.coql.READ ZohoCRM.modules.deals.READ ZohoCRM.users.READ", expires_in: 3600 }));
+        return;
+      }
+      if (f.get("refresh_token") !== "e2e-zoho-refresh" || f.get("grant_type") !== "refresh_token") { res.writeHead(400, { "Content-Type": "application/json" }).end('{"error":"invalid_grant"}'); return; }
       res.writeHead(200, { "Content-Type": "application/json" }).end('{"access_token":"zt-1","expires_in":3600}');
       return;
     }
@@ -142,7 +149,7 @@ async function startNext() {
       MAIL_PROVIDER: "brevo", BREVO_API_KEY: "e2e-brevo", BREVO_API_TEST_BASE: MOCK_BASE,
       GOOGLE_CLIENT_ID: "e2e-client", GOOGLE_CLIENT_SECRET: "e2e-secret", GOOGLE_OAUTH_TEST_BASE: `${MOCK_BASE}/google`,
       INBOUND_WEBHOOK_TOKEN: INBOUND_TOKEN, CRON_SECRET: CRON, TRUSTED_AUTHSERV_IDS: "", MOOVIN_COPY_CORRESPONDENCE: "1", MOOVIN_API_MODE: "an",
-      ZOHO_CLIENT_ID: "e2e-zoho", ZOHO_CLIENT_SECRET: "e2e-zoho-secret", ZOHO_REFRESH_TOKEN: "e2e-zoho-refresh", ZOHO_TEST_BASE: `${MOCK_BASE}/zoho`,
+      ZOHO_CLIENT_ID: "", ZOHO_CLIENT_SECRET: "", ZOHO_REFRESH_TOKEN: "", ZOHO_TEST_BASE: `${MOCK_BASE}/zoho`,
     },
     stdio: ["ignore", "pipe", "pipe"], detached: true,
   });
@@ -570,13 +577,35 @@ async function main() {
     });
 
     console.log("\n13 CRM-Zuordnung und Livetest ohne moovin-API");
-    await check("CRM-Abgleich (nur lesend) über „Objekte“: Objekte mit AM, Dubletten, unklare Namen", async () => {
+    await check("Zoho verbinden in der App: falscher Code → Hinweis, richtiger Code → Lese-Token serverseitig, Abgleich", async () => {
       await admin.goto(`${BASE}/team`);
       await admin.click('[data-testid="link-objekte"]');
       await admin.waitForURL(`${BASE}/objekte`);
+      const form = admin.locator('[data-testid="zoho-connect"]');
+      await form.locator('input[name="client_id"]').fill("e2e-zoho");
+      await form.locator('input[name="client_secret"]').fill("e2e-zoho-secret");
+      await form.locator('input[name="code"]').fill("1000.abgelaufen");
+      await form.locator('button:has-text("Verbinden")').click();
+      await admin.waitForSelector('[data-testid="zoho-msg"]');
+      assert((await admin.locator('[data-testid="zoho-msg"]').innerText()).includes("nicht angenommen"), "kein Hinweis bei falschem Code");
+      assert(!(await sql`select 1 from ticket.settings where key = 'zoho_auth'`).length, "Token trotz Fehler gespeichert");
+      zoho.calls = [];
+      const f2 = admin.locator('[data-testid="zoho-connect"]');
+      await f2.locator('input[name="client_id"]').fill("e2e-zoho");
+      await f2.locator('input[name="client_secret"]').fill("e2e-zoho-secret");
+      await f2.locator('input[name="code"]').fill("1000.e2e-grant");
+      await f2.locator('button:has-text("Verbinden")').click();
+      await admin.waitForSelector('[data-testid="zoho-status"]');
+      assert((await admin.locator('[data-testid="zoho-msg"]').innerText()).includes("6 Objekte"), await admin.locator('[data-testid="zoho-msg"]').innerText());
+      const [z] = await sql`select value from ticket.settings where key = 'zoho_auth'`;
+      assert(z?.value.refresh_token === "e2e-zoho-refresh", "Token fehlt");
+      assert(!(await admin.content()).includes("e2e-zoho-secret") && !(await admin.content()).includes("e2e-zoho-refresh"), "Geheimnis im Browser");
+      assert(!(await sql`select 1 from ticket.audit_log where detail::text like '%e2e-zoho-secret%' or detail::text like '%e2e-zoho-refresh%'`).length, "Geheimnis im Audit-Log");
+    });
+    await check("CRM-Abgleich (nur lesend) über „Objekte“: Objekte mit AM, Dubletten, unklare Namen", async () => {
       zoho.calls = [];
       await admin.click('button:has-text("Jetzt abgleichen")');
-      await until(async () => (await sql`select value from ticket.settings where key = 'crm_sync' and updated_by = ${"am:" + ADMIN}`)[0]);
+      await until(async () => Number((await sql`select count(*) from ticket.audit_log where detail->>'event' = 'crm_abgleich' and actor = ${"am:" + ADMIN}`)[0].count) >= 2);
       const [st] = await sql`select value from ticket.settings where key = 'crm_sync'`;
       assert(st.value.ok && st.value.rows === 6 && JSON.stringify(st.value.unresolved) === '["Erika Unbekannt"]', JSON.stringify(st.value));
       assert(zoho.calls.every((c) => c === "token" || c.startsWith("POST /zoho/crm/v8/coql") || c.startsWith("GET /zoho/crm/v8/users")), `Schreibzugriff? ${zoho.calls.join(",")}`);
