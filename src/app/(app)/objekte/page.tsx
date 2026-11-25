@@ -4,7 +4,8 @@ import { requireAdmin } from "@/lib/auth";
 import { getSetting, moovinEnabled } from "@/lib/settings";
 import { zohoReady, type CrmSyncResult } from "@/lib/crm/zoho";
 import { fmtLong } from "@/components/ui";
-import { setMoovinModeAction, syncCrmAction, connectZohoAction, disconnectZohoAction } from "./actions";
+import { setMoovinModeAction, syncCrmAction, connectZohoAction, disconnectZohoAction, setupBrevoInboundAction } from "./actions";
+import { mailSetupStatus, INBOUND_DOMAIN } from "@/lib/mail-setup";
 import { addAgentAction } from "../team/actions";
 
 /** Objekte & Zuordnung (Admin): moovin-Anbindung an/aus, CRM-Abgleich Objekt → AM, AMs laut CRM, Objektsuche. */
@@ -13,6 +14,8 @@ export default async function Objekte(props: PageProps<"/objekte">) {
   const sp = await props.searchParams;
   const q = typeof sp.q === "string" ? sp.q.trim() : "";
   const zohoMsg = typeof sp.zoho === "string" ? sp.zoho : "";
+  const mailMsg = typeof sp.mail === "string" ? sp.mail : "";
+  const mail = await mailSetupStatus();
   const zoho = await zohoReady();
   const moovinOn = await moovinEnabled();
   const sync = await getSetting<CrmSyncResult>("crm_sync");
@@ -47,6 +50,22 @@ export default async function Objekte(props: PageProps<"/objekte">) {
         <form action={setMoovinModeAction.bind(null, !moovinOn)}>
           <button className={moovinOn ? "btn-ghost" : "btn-pink"}>{moovinOn ? "moovin-Anbindung ausschalten (Livetest)" : "moovin-Anbindung einschalten"}</button>
         </form>
+      </section>
+
+      <section className="card p-5 space-y-3" data-testid="mail-setup">
+        <h2 className="font-semibold text-navy">Mail-Eingang (Brevo)</h2>
+        <p className="text-sm text-muted max-w-3xl">mieter@moovin.de leitet an <code>mieter@{INBOUND_DOMAIN}</code> weiter; Brevo nimmt die Mails an und übergibt sie dem Ticketsystem. Antworten gehen über Brevo mit Absender mieter@moovin.de.</p>
+        <ul className="text-sm space-y-1">
+          <Check ok={mail.brevoKey} label="Brevo-API-Schlüssel in Vercel (BREVO_API_KEY)" />
+          <Check ok={!!mail.senderDomain?.authenticated} label={`Absenderdomain bei Brevo bestätigt${mail.senderDomain ? ` (${mail.senderDomain.name})` : ""}`} hint={mail.brevoKey && !mail.senderDomain ? "Domain in Brevo noch nicht angelegt" : undefined} />
+          <Check ok={mail.mx.ok} label={`MX-Einträge ${INBOUND_DOMAIN} → Brevo`} hint={mail.mx.hosts.length ? `aktuell: ${mail.mx.hosts.join(", ")}` : "noch keine MX-Einträge gefunden"} />
+          <Check ok={!!mail.webhook?.urlOk} label="Brevo-Webhook für den Eingang eingerichtet" hint={mail.webhook && !mail.webhook.urlOk ? "zeigt auf eine andere Adresse – neu einrichten" : undefined} />
+        </ul>
+        {mail.error && <p className="text-sm text-pink">{mail.error}</p>}
+        {mailMsg && <p className="text-sm rounded-lg bg-canvas px-3 py-2" data-testid="mail-msg">{mailMsg}</p>}
+        {mail.brevoKey && (
+          <form action={setupBrevoInboundAction}><button className={mail.webhook?.urlOk ? "btn-ghost" : "btn-pink"}>{mail.webhook ? "Brevo-Eingang neu einrichten" : "Brevo-Eingang einrichten"}</button></form>
+        )}
       </section>
 
       <section className="card p-5 space-y-3" data-testid="crm-sync">
@@ -136,5 +155,15 @@ export default async function Objekte(props: PageProps<"/objekte">) {
         )}
       </section>
     </div>
+  );
+}
+
+function Check({ ok, label, hint }: { ok: boolean; label: string; hint?: string }) {
+  return (
+    <li className="flex items-baseline gap-2">
+      <span className={ok ? "text-emerald-600" : "text-pink"}>{ok ? "✓" : "✗"}</span>
+      <span className={ok ? "text-ink" : "text-muted"}>{label}</span>
+      {hint && <span className="text-xs text-muted">· {hint}</span>}
+    </li>
   );
 }
