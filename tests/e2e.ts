@@ -4,7 +4,7 @@
 //
 // Der Test
 //  - setzt die LOKALE Datenbank zurück (nur localhost erlaubt) und spielt die Testdaten ein,
-//  - startet einen Testserver für Google-Login und Brevo (Port 4010),
+//  - startet einen Testserver für Google-Login, Brevo und Zoho CRM (Port 4010),
 //  - startet `next dev` auf Port 3100 im Demo-Modus (ohne Claude-Key, keine Kosten),
 //  - prüft alle Funktionen über die Oberfläche (Playwright) und direkt in der Datenbank.
 // Voraussetzung: DATABASE_URL (lokal) in .env.local, Playwright mit Chromium installiert, kein anderer `next dev` im Ordner.
@@ -17,6 +17,7 @@ import { join } from "node:path";
 import postgres from "postgres";
 import { parseBrevo, parsePostmark } from "../src/lib/inbound/parse";
 import { checkIdClaims } from "../src/lib/oidc";
+import { normalizeAddress, addressKey, matchObjects, resolveAmEmail, type CrmObject } from "../src/lib/crm/match";
 
 // ---------- Umgebung ----------
 function loadEnvLocal() {
@@ -48,6 +49,27 @@ type Pending = { nonce: string; challenge: string; email: string; hd: string };
 const google = { nextUser: { email: "", hd: "moovin.de" }, codes: new Map<string, Pending>() };
 const brevo = { sent: [] as Record<string, unknown>[], n: 0 };
 
+// Testdaten Zoho CRM (Abschlüsse, Pipeline Vermietung) – Form wie die echte COQL-Antwort
+const deal = (id: string, o: Record<string, string | null>) => ({ id, Deal_Name: `1NKM: ${o.moovin_ID ?? "SP"}: ${o.Stra_e}`, Kunden_Objekt_ID: null,
+  "Account_Name.Account_Name": "Testkunde GmbH", Modified_Time: "2026-11-20T10:00:00+01:00", PLZ: null, Ort: null, moovin_ID: null, ...o });
+const zoho = {
+  calls: [] as string[],
+  open: [
+    deal("9001", { moovin_ID: "MV-TST001", Stra_e: "Teststraße 12", PLZ: "10115", Ort: "Berlin", Stage: "Online / Besichtigungen", Neu_Zust_ndiger_Account_Manager: "Lena Hoffmann" }),
+    deal("9002", { moovin_ID: "MV-TST002", Stra_e: "Musterweg 7", PLZ: "20095", Ort: "Hamburg", Stage: "Quervermarktung", Neu_Zust_ndiger_Account_Manager: "Ole Wenner" }),
+    deal("9012", { moovin_ID: "MV-TST002", Stra_e: "Musterweg 7", PLZ: "20095", Ort: "Hamburg", Stage: "Auftragseingang", Neu_Zust_ndiger_Account_Manager: "Lena Hoffmann", Modified_Time: "2026-01-01T10:00:00+01:00" }),
+    deal("9003", { moovin_ID: "MV-TST003", Stra_e: "Teststraße 12", PLZ: "80331", Ort: "München", Stage: "Online / Besichtigungen", Neu_Zust_ndiger_Account_Manager: "Jonas Weber" }),
+    deal("9004", { Stra_e: "Kollower Straße", PLZ: "21493", Ort: "Schwarzenbek", Stage: "Quervermarktung", Neu_Zust_ndiger_Account_Manager: "Jonas Weber" }),
+    deal("9005", { moovin_ID: "MV-TST005", Stra_e: "Ringweg 3", PLZ: "50667", Ort: "Köln", Stage: "On Hold_in Vorbereitung", Neu_Zust_ndiger_Account_Manager: "Erika Unbekannt" }),
+  ],
+  recent: [deal("9009", { moovin_ID: "MV-TST009", Stra_e: "Altbauweg 3", PLZ: "04109", Ort: "Leipzig", Stage: "Rechnungserstellung", Neu_Zust_ndiger_Account_Manager: "Jonas Weber" })],
+  users: [
+    { full_name: "Lena Hoffmann", email: "lena.hoffmann@moovin.de", status: "active" },
+    { full_name: "Jonas Weber", email: "jonas.weber@moovin.de", status: "active" },
+    { full_name: "Ole Wenner", email: "wenner@moovin.de", status: "active" },
+  ],
+};
+
 function b64url(o: unknown) { return Buffer.from(JSON.stringify(o)).toString("base64url"); }
 
 function startMock(): Promise<Server> {
@@ -72,6 +94,26 @@ function startMock(): Promise<Server> {
         sub: `sub-${c.email}`, email: c.email, email_verified: true, hd: c.hd, name: c.email.split("@")[0].replace(".", " ") };
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ id_token: `${b64url({ alg: "RS256" })}.${b64url(claims)}.sig` }));
       return;
+    }
+    if (url.pathname === "/zoho/oauth/v2/token" && req.method === "POST") {
+      const f = new URLSearchParams(body);
+      zoho.calls.push("token");
+      if (f.get("client_secret") !== "e2e-zoho-secret" || f.get("refresh_token") !== "e2e-zoho-refresh" || f.get("grant_type") !== "refresh_token") { res.writeHead(400, { "Content-Type": "application/json" }).end('{"error":"invalid_client"}'); return; }
+      res.writeHead(200, { "Content-Type": "application/json" }).end('{"access_token":"zt-1","expires_in":3600}');
+      return;
+    }
+    if (url.pathname.startsWith("/zoho/crm/")) {
+      if (req.headers.authorization !== "Zoho-oauthtoken zt-1") { res.writeHead(401).end(); return; }
+      zoho.calls.push(`${req.method} ${url.pathname}`);
+      if (url.pathname === "/zoho/crm/v8/users") { res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ users: zoho.users, info: { more_records: false } })); return; }
+      if (url.pathname === "/zoho/crm/v8/coql" && req.method === "POST") {
+        const query = String(JSON.parse(body).select_query ?? "");
+        if (!/from Deals where Pipeline = 'Vermietung'/.test(query) || /limit [1-9]\d*,/.test(query)) { res.writeHead(204).end(); return; }
+        const data = /Stage not in/.test(query) ? zoho.open : /Modified_Time >= '/.test(query) ? zoho.recent : [];
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ data, info: { count: data.length, more_records: false } }));
+        return;
+      }
+      res.writeHead(404).end(); return;
     }
     if (url.pathname.startsWith("/v3/inbound/attachments/")) {
       if (req.headers["api-key"] !== "e2e-brevo") { res.writeHead(401).end(); return; }
@@ -99,7 +141,8 @@ async function startNext() {
       ...process.env, NODE_ENV: "development", APP_URL: BASE, ANTHROPIC_API_KEY: "", MOOVIN_API_URL: "",
       MAIL_PROVIDER: "brevo", BREVO_API_KEY: "e2e-brevo", BREVO_API_TEST_BASE: MOCK_BASE,
       GOOGLE_CLIENT_ID: "e2e-client", GOOGLE_CLIENT_SECRET: "e2e-secret", GOOGLE_OAUTH_TEST_BASE: `${MOCK_BASE}/google`,
-      INBOUND_WEBHOOK_TOKEN: INBOUND_TOKEN, CRON_SECRET: CRON, TRUSTED_AUTHSERV_IDS: "", MOOVIN_COPY_CORRESPONDENCE: "1",
+      INBOUND_WEBHOOK_TOKEN: INBOUND_TOKEN, CRON_SECRET: CRON, TRUSTED_AUTHSERV_IDS: "", MOOVIN_COPY_CORRESPONDENCE: "1", MOOVIN_API_MODE: "an",
+      ZOHO_CLIENT_ID: "e2e-zoho", ZOHO_CLIENT_SECRET: "e2e-zoho-secret", ZOHO_REFRESH_TOKEN: "e2e-zoho-refresh", ZOHO_TEST_BASE: `${MOCK_BASE}/zoho`,
     },
     stdio: ["ignore", "pipe", "pipe"], detached: true,
   });
@@ -208,6 +251,30 @@ async function main() {
       assert(!checkIdClaims({ ...base, aud: "andere" }, o).ok, "fremde Audience akzeptiert");
       assert(!checkIdClaims({ ...base, exp: 1 }, o).ok, "abgelaufenes Token akzeptiert");
       assert(!checkIdClaims({ ...base, email_verified: false }, o).ok, "unbestätigte Mail akzeptiert");
+    });
+    await check("Adress-Normalisierung: Straße/Str., Bindestriche, Hausnummer mit Buchstabe", async () => {
+      assert(addressKey("Konsul-Schmidt-Straße 54") === addressKey("Konsul Schmidt Str. 54"), `${addressKey("Konsul-Schmidt-Straße 54")} vs ${addressKey("Konsul Schmidt Str. 54")}`);
+      assert(addressKey("Rheinstraße 25a") === "rheinstr 25a" && normalizeAddress("Rheinstr. 25 a") === "rheinstr 25a", normalizeAddress("Rheinstr. 25 a"));
+      assert(addressKey("Mastbrooker Weg") === null, "Schlüssel ohne Hausnummer");
+    });
+    await check("Objekt-Erkennung: moovin-ID, Adresse, PLZ entscheidet, Hausnummer exakt, verschiedene AMs → kein AM", async () => {
+      const o = (id: string, street: string, zip: string, am: string, live = true): CrmObject => ({ object_id: id, title: `${street}, ${zip}`, street, zip, match_key: addressKey(street), am_email: am, am_name: am, live });
+      const objs = [o("MV-AAA001", "Hauptstraße 4", "10115", "a@x"), o("MV-AAA002", "Hauptstraße 4", "80331", "b@x"), o("MV-AAA003", "Hauptstraße 49", "10115", "c@x"),
+                    o("MV-AAA004", "Ringweg 1", "20095", "d@x"), o("MV-AAA005", "Ringweg 1", "20095", "e@x", false)];
+      assert(matchObjects("Frage zu MV-AAA003", objs).amEmail === "c@x", "ID");
+      assert(matchObjects("Wohnung Hauptstr. 4, 10115 Berlin", objs).amEmail === "a@x", "PLZ");
+      assert(matchObjects("Wohnung Hauptstr. 4", objs).amEmail === null, "ohne PLZ eindeutig?");
+      assert(matchObjects("Hauptstraße 49 in Berlin", objs).object?.object_id === "MV-AAA003", "Hausnummer 49 ≠ 4");
+      assert(matchObjects("Ringweg 1", objs).amEmail === "d@x", "Vermarktung hat Vorrang");
+      assert(matchObjects("Ich suche eine Wohnung in Hamburg", objs).how === null, "Fehltreffer");
+    });
+    await check("AM-Name aus dem CRM → Mailadresse (unscharf, eindeutig)", async () => {
+      const users = [{ full_name: "Lilly Gehlsen", email: "gehlsen@moovin.de", active: true }, { full_name: "Caluta Osei", email: "osei@moovin.de", active: true },
+                     { full_name: "Tanja Muster", email: "t1@moovin.de", active: false }, { full_name: "Tanja Muster", email: "t2@moovin.de", active: false }];
+      assert(resolveAmEmail("Lillyan-Mia Gehlsen", users) === "gehlsen@moovin.de", "Gehlsen");
+      assert(resolveAmEmail("Caluta Blessing Osei", users) === "osei@moovin.de", "Osei");
+      assert(resolveAmEmail("Tanja Muster", users) === null, "mehrdeutig zugeordnet");
+      assert(resolveAmEmail("Max Mustermann", users) === null, "Unbekannter zugeordnet");
     });
 
     console.log("\n1 Login (nur Google)");
@@ -502,7 +569,85 @@ async function main() {
       for (const s of ["Tickets pro Tag", "Tickets pro Woche", "Erste Antwort", "Auto-Quote je Anliegen", "Überfällig", "Offene Aufgaben je AM"]) assert(txt.includes(s), `fehlt: ${s}`);
     });
 
-    console.log("\n13 Leitplanken");
+    console.log("\n13 CRM-Zuordnung und Livetest ohne moovin-API");
+    await check("CRM-Abgleich (nur lesend) über „Objekte“: Objekte mit AM, Dubletten, unklare Namen", async () => {
+      await admin.goto(`${BASE}/team`);
+      await admin.click('[data-testid="link-objekte"]');
+      await admin.waitForURL(`${BASE}/objekte`);
+      zoho.calls = [];
+      await admin.click('button:has-text("Jetzt abgleichen")');
+      await until(async () => (await sql`select value from ticket.settings where key = 'crm_sync' and updated_by = ${"am:" + ADMIN}`)[0]);
+      const [st] = await sql`select value from ticket.settings where key = 'crm_sync'`;
+      assert(st.value.ok && st.value.rows === 6 && JSON.stringify(st.value.unresolved) === '["Erika Unbekannt"]', JSON.stringify(st.value));
+      assert(zoho.calls.every((c) => c === "token" || c.startsWith("POST /zoho/crm/v8/coql") || c.startsWith("GET /zoho/crm/v8/users")), `Schreibzugriff? ${zoho.calls.join(",")}`);
+      const [t1] = await sql`select * from ticket.crm_objects where object_id = 'MV-TST001'`;
+      assert(t1.am_email === LENA && t1.live && t1.match_key === "teststr 12", JSON.stringify(t1));
+      const [t2] = await sql`select am_name, stage from ticket.crm_objects where object_id = 'MV-TST002'`;
+      assert(t2.am_name === "Ole Wenner" && t2.stage === "Quervermarktung", `Dublette: ${JSON.stringify(t2)}`);
+      assert((await sql`select 1 from ticket.crm_objects where object_id = 'CRM-9004' and match_key is null`).length, "Stellplatz ohne Nr.");
+      await admin.reload();
+      assert((await admin.locator('[data-testid="crm-count"]').innerText()) === "6", "Zähler");
+      assert((await admin.locator('[data-testid="crm-ams"]').innerText()).includes("Ole Wenner"), "AM-Liste");
+    });
+    await check("moovin-Anbindung ausschalten → Hinweis für alle, Audit", async () => {
+      await admin.click('button:has-text("moovin-Anbindung ausschalten")');
+      await until(async () => (await sql`select value from ticket.settings where key = 'moovin_api'`)[0]?.value === "aus");
+      await lena.goto(`${BASE}/mein`);
+      assert(await lena.locator('[data-testid="banner-moovin-off"]').count() === 1, "kein Hinweis");
+      assert((await sql`select 1 from ticket.audit_log where detail->>'event' = 'moovin_anbindung' and detail->>'value' = 'aus'`).length, "Audit fehlt");
+    });
+    let offId = 0;
+    await check("Ohne moovin: Adresse in der Mail → AM laut CRM, kein moovin-Aufruf, Platzhalter statt „unbekannt“", async () => {
+      const calls = Number((await sql`select count(*) from mock_moovin.request_log`)[0].count);
+      const t = await mailIn({ from: "paula.neu@example.com", name: "Paula Neu", subject: "Bewerbung", text: "Guten Tag,\n\nwie ist der Stand meiner Bewerbung für die Wohnung Teststr. 12, 10115 Berlin?\n\nPaula Neu" });
+      offId = Number(t.id);
+      assert(t.assignee_email === LENA && t.routing_source === "crm_adresse" && t.object_id === "MV-TST001", JSON.stringify({ a: t.assignee_email, r: t.routing_source, o: t.object_id }));
+      const [d] = await sql`select body_text from ticket.drafts where ticket_id = ${offId} order by id desc limit 1`;
+      assert(d.body_text.includes("[AM:") && !/keiner Bewerbung zuordnen/.test(d.body_text), d.body_text);
+      assert(Number((await sql`select count(*) from mock_moovin.request_log`)[0].count) === calls, "moovin wurde aufgerufen");
+      await lena.goto(`${BASE}/tickets/${offId}`);
+      assert(await lena.locator('[data-testid="moovin-off"]').count() === 1, "Hinweis im Ticket fehlt");
+      assert((await lena.locator('[data-testid="object-card"]').innerText()).includes("Adresse in der Mail"), "Zuordnungsquelle fehlt");
+    });
+    await check("Ohne moovin: Objekt eines nicht freigeschalteten AM → Allgemeiner Eingang mit Hinweis", async () => {
+      const t = await mailIn({ from: "karl.test@example.com", name: "Karl Test", subject: "Exposé MV-TST002", text: "Ist ein Stellplatz dabei?" });
+      assert(!t.assignee_email && /Ole Wenner/.test(t.routing_note ?? ""), JSON.stringify({ a: t.assignee_email, n: t.routing_note }));
+      await lena.goto(`${BASE}/eingang`);
+      assert((await lena.locator(`[data-testid="eingang-${t.id}"]`).innerText()).includes("Ole Wenner"), "Hinweis fehlt im Eingang");
+      // Zuordnung per Objekt ohne AM-Auswahl → AM laut CRM
+      const form = lena.locator(`[data-testid="eingang-${t.id}"] form`);
+      await form.locator('input[name="object"]').fill("MV-TST003");
+      await form.locator('button:has-text("Zuordnen")').click();
+      const [r] = await until(async () => { const x = await sql`select assignee_email, object_id, routing_source from ticket.tickets where id = ${t.id}`; return x[0].assignee_email ? x : null; });
+      assert(r.assignee_email === JONAS && r.object_id === "MV-TST003" && r.routing_source === "manuell", JSON.stringify(r));
+    });
+    await check("Ohne moovin: Rückzug → Aktion wird Aufgabe, nichts an moovin (auch unverifiziert)", async () => {
+      const notes = Number((await sql`select count(*) from mock_moovin.notes`)[0].count);
+      const t = await mailIn({ from: "paula.neu@example.com", name: "Paula Neu", subject: `Re: Bewerbung [#T-${offId}]`, text: "Ich ziehe meine Bewerbung für die Teststraße 12 zurück, ich habe etwas anderes gefunden.", verified: false });
+      assert(Number(t.id) === offId, `Ticket ${t.id}`);
+      const [a] = await sql`select status, payload, label from ticket.actions where ticket_id = ${offId} and status in ('vorgeschlagen','blockiert') order by id desc limit 1`;
+      assert(a?.status === "vorgeschlagen" && a.payload.manual && /Aufgabe für den AM/.test(a.label), JSON.stringify(a));
+      await sendFromUi(lena, offId, { awaitReply: false });
+      const [k] = await until(async () => { const r = await sql`select * from ticket.tasks where ticket_id = ${offId} and type = 'rueckzug'`; return r.length ? r : null; });
+      assert(k.assignee_email === LENA && k.status === "offen", JSON.stringify(k));
+      const [x] = await sql`select status, result from ticket.actions where ticket_id = ${offId} and payload->>'manual' = 'true' order by id desc limit 1`;
+      assert(x.status === "ausgefuehrt" && x.result.manuell, JSON.stringify(x));
+      assert(Number((await sql`select count(*) from mock_moovin.notes`)[0].count) === notes, "Notiz an moovin geschrieben");
+      assert(!(await sql`select 1 from mock_moovin.correspondence where body like '%Teststraße 12 zurück%'`).length, "Kopie an moovin");
+    });
+    await check("Ohne moovin: allgemeine Frage ohne Objekt → Eingang mit Grund", async () => {
+      const t = await mailIn({ from: "suche.jemand@example.com", name: "Suche Jemand", subject: "Wohnung gesucht", text: "Haben Sie eine 3-Zimmer-Wohnung in Hamburg für mich?" });
+      assert(!t.assignee_email && /Kein Objekt in der Mail erkannt/.test(t.routing_note ?? ""), JSON.stringify({ a: t.assignee_email, n: t.routing_note }));
+    });
+    await check("moovin-Anbindung wieder einschalten", async () => {
+      await admin.goto(`${BASE}/objekte`);
+      await admin.click('button:has-text("moovin-Anbindung einschalten")');
+      await until(async () => (await sql`select value from ticket.settings where key = 'moovin_api'`)[0]?.value === "an");
+      await lena.goto(`${BASE}/mein`);
+      assert(await lena.locator('[data-testid="banner-moovin-off"]').count() === 0, "Hinweis bleibt");
+    });
+
+    console.log("\n14 Leitplanken");
     await check("Keine Mail an Bewerber ohne Freigabe/Auto-Regel (keine proaktiven Mails)", async () => {
       const toApplicants = brevo.sent.filter((m) => !String((m as { to: { email: string }[] }).to[0].email).endsWith("@moovin.de"));
       const outs = await sql`select count(*) from ticket.messages where direction = 'out'`;
