@@ -1,6 +1,6 @@
 # moovin Ticketsystem – Anforderungen (SPEC)
 
-Stand: 24.11.2026 · Owner: Fabian Mellin · Umsetzung Prototyp: Fabian + Claude · Anbindung moovin: Guido (IT)
+Stand: 25.11.2026 · Owner: Fabian Mellin · Umsetzung Prototyp: Fabian + Claude · Anbindung moovin: Guido (IT)
 
 ## 1. Ziel
 
@@ -37,7 +37,7 @@ Ticketsystem bearbeitet. Claude beantwortet Anliegen auf Basis einer Wissensdate
 | AM-Zugriff | Eigene Oberfläche, nur Google-Login (Workspace-Domain moovin.de, Scopes openid/email/profile). Unbekannte moovin-Adressen erst nach Freischaltung durch Admin |
 | Wissen | Objektinfos automatisch per API aus moovin, AM ergänzt/prüft. Allgemeine FAQ pflegt Ops zentral |
 | Ton | „Sie“, Antwort in der Sprache der eingehenden Mail |
-| Zuteilung | AM des Objekts; ohne AM → Allgemeiner Eingang. Abwesenheit mit Vertretung (ohne Vertretung → Allgemeiner Eingang). Überfällige sieht das Team |
+| Zuteilung | AM des Objekts (aus moovin, sonst laut CRM über das in der Mail erkannte Objekt); ohne AM → Allgemeiner Eingang. Abwesenheit mit Vertretung (ohne Vertretung → Allgemeiner Eingang). Überfällige sieht das Team |
 | SLA | Menschlich bearbeitete Tickets: Antwort am gleichen Werktag |
 | Stack | Next.js auf Vercel, Postgres (Supabase, Region Frankfurt), Claude API |
 | API-Auth | HMAC-signierte Requests mit Zeitstempel, Schlüssel rotierbar, jeder Aufruf geloggt; keine IP-Allowlist (feste Ausgangs-IPs kosten bei Vercel extra) |
@@ -96,7 +96,8 @@ Nicht eindeutig → keine Terminaktion, Rückfrage an den Bewerber.
     Nach 7 Tagen ohne Antwort: Aufgabe „nachfassen“ für den AM (täglicher Cron), keine Mail an den Bewerber.
   - *Automatisch erledigt:* Auto-Antworten, Filter nach Anliegen, „gegengelesen“ markieren, Auto-Quote (30 Tage) oben.
 - **Allgemeiner Eingang:** alles ohne zuständigen AM (unbekannter Absender, ohne Objekt, nicht zuständig, AM abwesend ohne Vertretung).
-  Zuordnung per Klick zu Objekt und/oder AM; ohne AM-Auswahl übernimmt der AM, der das Objekt zuletzt betreut hat. Audit-Log.
+  Mit Grund (z. B. „gehört laut CRM zu … – noch nicht freigeschaltet“). Zuordnung per Klick zu Objekt und/oder AM; ohne AM-Auswahl
+  übernimmt der AM laut CRM, sonst der AM, der das Objekt zuletzt betreut hat. Audit-Log.
 - **Alle Tickets:** Filter Offen / Meine / Allgemeiner Eingang / Wartet / Überfällig / Erledigt.
 - **Ticket-Detail:** Verlauf, Bewerber-Kontext live aus moovin, KI-Analyse, editierbarer Entwurf, Aktionen (an/aus),
   „Freigeben & senden“, „Neu generieren“, „Ohne Antwort schließen“, Übernehmen, Zuordnen.
@@ -106,6 +107,7 @@ Nicht eindeutig → keine Terminaktion, Rückfrage an den Bewerber.
 - **Abwesenheit:** Zeitraum + Vertretung (AM selbst, Admin für alle). Neue und offene Tickets/Aufgaben gehen an die Vertretung,
   ohne Vertretung in den Allgemeinen Eingang. Danach bleiben sie bei der Vertretung; Tickets aus dem Allgemeinen Eingang gehen zurück an den AM.
 - **Suche** über alle Tickets (Name, Mailadresse, Objekt, Ticket-Nr.) mit denselben Sichtrechten.
+- **Objekte & Zuordnung (Admin, über Team):** Schalter moovin-Anbindung, CRM-Abgleich (Stand, Knopf), AMs laut CRM mit „Freischalten“, Objektsuche.
 - **Dashboard (Admin):** Tickets pro Tag/Woche, erste Antwortzeit (Median/90 %), Auto-Quote je Anliegen, offene/überfällige Tickets, offene Aufgaben je AM.
 - **Wissen:** FAQ (global) und Ergänzungen je Objekt; Objektdaten aus moovin read-only daneben.
 - **Autonomie (Admin):** je Intent Anzahl, Quote „unverändert übernommen“, Modus Entwurf/Auto, Schwelle.
@@ -114,7 +116,12 @@ Nicht eindeutig → keine Terminaktion, Rückfrage an den Bewerber.
 - Deep-Link aus moovin: `/tickets?email=<adresse>` und `/tickets/<id>`.
 
 ### 4.7 Zuteilung & SLA
-- Zuständig: AM des Objekts (aus moovin). Unbekannt → Allgemeiner Eingang. Abwesend → Vertretung bzw. Allgemeiner Eingang.
+- Zuständig: AM des Objekts. Reihenfolge: (1) AM aus der Bewerbung in moovin, (2) AM laut CRM für das Objekt, das in der Mail
+  erkannt wird (moovin-ID wie `MV-ABC123`, sonst „Straße Hausnummer“, bei gleicher Adresse in mehreren Orten entscheidet die PLZ;
+  auch im zitierten Original). Mehrere Objekte verschiedener AMs → Objekte in Vermarktung haben Vorrang, sonst Allgemeiner Eingang.
+- Tickets gehen nur an AMs, die im Ticketsystem freigeschaltet sind; sonst Allgemeiner Eingang mit Hinweis („gehört laut CRM zu …“).
+- Unbekannt → Allgemeiner Eingang mit Grund. Abwesend → Vertretung bzw. Allgemeiner Eingang.
+- Zuordnung per Klick zu einem Objekt ohne AM-Auswahl: AM laut CRM, sonst der AM, der das Objekt zuletzt betreut hat.
 - Tickets „wartet auf Bewerber“ haben keine Fälligkeit; die Antwort des Bewerbers setzt sie neu.
 - Fälligkeit: Eingang an Werktag vor 16:00 → 18:00 desselben Tages; sonst nächster Werktag 12:00 (Europe/Berlin).
 - Überfällige Tickets sieht das ganze Team.
@@ -130,12 +137,35 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 - ~7 % Unterlagen/Selbstauskunft, ~6 % Status/Absage, ~3 % Mietangebot; ~17 % ohne aussagekräftigen Betreff.
 - Export enthält kaum Mailtexte (nur 294 Beschreibungen) → Feinschliff der Antworten mit echten Mails im Pilot (Schattenbetrieb).
 
+### 4.10 Objekt → AM aus dem CRM (Zoho, nur lesend)
+- Quelle: Modul „Abschlüsse“, Pipeline „Vermietung“: alle offenen Abschlüsse und abgeschlossene der letzten 60 Tage.
+  Felder: `moovin_ID`, Straße, PLZ, Ort, „Zuständiger Account Manager“ (Auswahlliste mit Namen), Kunde, Phase.
+- Name → Mailadresse über die CRM-Benutzer (gleicher Nachname und passender Vorname, z. B. „Lillyan-Mia Gehlsen“ → „Lilly Gehlsen“);
+  mehrdeutig → keine Zuordnung. Nicht auflösbare Namen zeigt die Seite „Objekte“.
+- Abgleich täglich (Cron) und per Knopf (Admin). Zugang: Zoho Self Client mit den Scopes `ZohoCRM.coql.READ`,
+  `ZohoCRM.modules.deals.READ`, `ZohoCRM.users.READ`. Ins CRM wird nie geschrieben.
+- Tabelle `ticket.crm_objects`; Objekte, die nicht mehr geliefert werden, bleiben inaktiv erhalten.
+- Stand 25.11.2026: ≈ 3.550 Objekte, davon ≈ 1.330 in Vermarktung; ≈ 64 % per Adresse erkennbar (Stellplätze und Objekte ohne Hausnummer nicht),
+  bei ≈ 94 % der erkennbaren Adressen ist der AM eindeutig.
+
+### 4.11 Livetest ohne moovin-API (Schalter „moovin-Anbindung“)
+- Admin schaltet unter **Team → Objekte & Zuordnung** um (Standard über `MOOVIN_API_MODE`, `an`/`aus`). Hinweisleiste für alle.
+- **Aus:** keine Abfragen und keine Schreibaufrufe an moovin, keine Kopie in moovin. Zuordnung nur über das CRM (4.7).
+- Die KI arbeitet ohne Bewerberdaten: Sie schreibt nie, die Adresse sei unbekannt, sondern setzt `[AM: …]`-Platzhalter für persönliche
+  Angaben (Stand, Termin, Treffpunkt). Allgemeine Fragen beantwortet sie wie sonst.
+- Vorgeschlagene Aktionen (Unterlagen, Termin bestätigen/absagen, Rückzug, Interesse, Notiz) gehen nicht an moovin, sondern werden
+  nach der Freigabe zu **Aufgaben** für den AM; der Verschiebewunsch geht wie immer per Mail an den AM.
+- Antworten gehen an die Absenderadresse (es gibt keine hinterlegte Adresse aus moovin); persönliche Angaben ergänzt der AM nur nach Prüfung in moovin.
+- Auto-Versand nur für allgemeine Anliegen (Wohnungssuche, Datenschutz, Login) und nie mit Platzhalter oder Aufgabe.
+- **An:** Verhalten wie zuvor; das CRM ergänzt nur, wenn moovin keinen AM liefert.
+
 ## 5. Sicherheit & Datenschutz
 - Hosting EU (Vercel Region `fra1`, Postgres Frankfurt). AVV mit Anthropic, Zero-Data-Retention anfragen.
 - Datenminimierung: Claude sieht nur den Ausschnitt zum Absender; keine Anhänge, kein Score.
 - Secrets nur als Umgebungsvariablen, nie im Code/Chat.
 - Rollen: `am`, `admin`. AM sieht eigene Tickets, Allgemeinen Eingang und Überfällige (auch in der Suche).
 - Keine proaktiven Mails an Bewerber, keine Massen-Freigabe; Eingriffe in moovin nur über die fünf API-Aufrufe.
+- CRM (Zoho) nur lesend, nur Abschlüsse der Vermietung und Benutzernamen/-adressen; Kundennamen sieht nur das Team, nie die KI.
 - Audit-Log unveränderlich (insert-only).
 - Löschkonzept: geschlossene Tickets + Anhänge nach 6 Monaten löschen (analog Bewerberdaten), konfigurierbar.
 - Prompt-Injection: Mailinhalt ist Daten, nicht Anweisung. Werkzeuge sind an den Absender gebunden; Aktionen erst nach
@@ -148,6 +178,8 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 4. Pilot mit 1–2 AMs, danach Umstellung mieter@ und Abschaltung Zoho Desk
 
 ## 7. Offene Punkte
+- Zoho Self Client anlegen (api-console.zoho.eu, Scopes siehe 4.10) und `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN` setzen;
+  danach erster Abgleich per Knopf. Rechenzentrum EU ist voreingestellt (`ZOHO_ACCOUNTS_URL`, `ZOHO_API_BASE`).
 - Google-OAuth-Client (Google Cloud, Workspace moovin.de) anlegen: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` setzen.
   Bis dahin gilt übergangsweise das Prototyp-Passwort; mit Google-Zugangsdaten ist es automatisch abgeschaltet.
 - Brevo einrichten (Tarif klären): Empfangs-Subdomain (z. B. reply.moovin.de, MX auf Brevo), Weiterleitung mieter@ → Subdomain,
