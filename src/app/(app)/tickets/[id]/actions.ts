@@ -55,23 +55,27 @@ export async function assignAction(ticketId: number, form: FormData) {
   if (objectRaw) {
     // Eingabe „OBJ-ID · Titel“ aus der Liste oder freie Objekt-ID
     const id = objectRaw.split(" · ")[0].trim();
+    const [crmObj] = await sql`select object_id, title from ticket.crm_objects where upper(object_id) = upper(${id})`;
     const [known] = await sql`select object_id, object_title from ticket.tickets where object_id = ${id} and object_title is not null order by created_at desc limit 1`;
-    objectId = id;
-    objectTitle = known?.object_title ?? (objectRaw.includes(" · ") ? objectRaw.split(" · ").slice(1).join(" · ") : cur.object_title);
+    objectId = crmObj?.object_id ?? id;
+    objectTitle = crmObj?.title ?? known?.object_title ?? (objectRaw.includes(" · ") ? objectRaw.split(" · ").slice(1).join(" · ") : cur.object_title);
   }
 
   let target: string | null = email ? (await sql`select email from ticket.agents where email = ${email} and active`)[0]?.email ?? null : null;
   // Kein AM gewählt: zugeordneter AM bleibt; ohne AM übernimmt der AM, der das Objekt zuletzt betreut hat
   if (!email && cur.assignee_email) target = cur.assignee_email;
   else if (!email && objectId) {
-    const [last] = await sql`select assignee_email from ticket.tickets where object_id = ${objectId} and assignee_email is not null and id <> ${ticketId}
+    // AM laut CRM (falls im Ticketsystem freigeschaltet), sonst der AM, der das Objekt zuletzt betreut hat
+    const [crmAm] = await sql`select a.email from ticket.crm_objects o join ticket.agents a on a.email = o.am_email and a.active where o.object_id = ${objectId}`;
+    const [last] = crmAm ? [] : await sql`select assignee_email from ticket.tickets where object_id = ${objectId} and assignee_email is not null and id <> ${ticketId}
                              order by updated_at desc limit 1`;
-    target = last?.assignee_email ?? null;
+    target = crmAm?.email ?? last?.assignee_email ?? null;
   }
   const eff = target ? await effectiveAssignee(target) : { assignee: null, deputyFor: null };
   if (eff.assignee && eff.assignee === cur.assignee_email && !eff.deputyFor) eff.deputyFor = cur.deputy_for;
 
-  await sql`update ticket.tickets set assignee_email = ${eff.assignee}, deputy_for = ${eff.deputyFor}, object_id = ${objectId}, object_title = ${objectTitle}, updated_at = now() where id = ${ticketId}`;
+  await sql`update ticket.tickets set assignee_email = ${eff.assignee}, deputy_for = ${eff.deputyFor}, object_id = ${objectId}, object_title = ${objectTitle},
+            routing_source = ${eff.assignee ? "manuell" : null}, routing_note = null, updated_at = now() where id = ${ticketId}`;
   await audit(`am:${agent.email}`, "ticket", { event: "zugeordnet", object: objectId, to: eff.assignee ?? "Allgemeiner Eingang", deputy_for: eff.deputyFor }, ticketId);
   revalidatePath(`/tickets/${ticketId}`);
 }

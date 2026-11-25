@@ -40,7 +40,7 @@ export function DraftPanel(props: { ticketId: number; draftId: number | null; dr
 
       {props.actions.length > 0 && (
         <div>
-          <div className="label">Aktionen in moovin</div>
+          <div className="label">Aktionen nach Freigabe</div>
           <ul className="space-y-2">
             {props.actions.map((a) => (
               <li key={a.id} className={`flex items-start gap-3 rounded-lg border px-3 py-2 text-sm ${a.status === "blockiert" ? "border-amber-200 bg-amber-50" : "border-line bg-white"}`}>

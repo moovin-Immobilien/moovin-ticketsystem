@@ -9,6 +9,8 @@ import { DraftPanel } from "./DraftPanel";
 import { Presence } from "./Presence";
 import { takeOverAction, assignAction, addNoteAction, handoverAction, mergeAction, reviewedAction, taskDoneAction } from "./actions";
 import { knownObjects } from "@/lib/objects";
+import { moovinEnabled } from "@/lib/settings";
+import { crmObject } from "@/lib/crm/objects";
 
 export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
   const agent = await requireAgent();
@@ -31,9 +33,14 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
   const lastOutId = messages.filter((m) => m.direction === "out").reduce((mx, m) => Math.max(mx, Number(m.id)), 0) || null;
   const deputyForName = t.deputy_for ? (agents.find((a) => a.email === t.deputy_for)?.name ?? t.deputy_for) : null;
 
+  const moovinOn = await moovinEnabled();
   let ctx: ApplicantContext | null = null;
   let ctxError: string | null = null;
-  try { ctx = await new MoovinClient(t.sender_email, ticketId).getApplicantContext(); } catch (e) { ctxError = (e as Error).message; }
+  if (moovinOn) {
+    try { ctx = await new MoovinClient(t.sender_email, ticketId).getApplicantContext(); } catch (e) { ctxError = (e as Error).message; }
+  }
+  const obj = t.object_id ? await crmObject(t.object_id) : null;
+  const ROUTING: Record<string, string> = { moovin: "aus moovin", crm_id: "CRM (moovin-ID in der Mail)", crm_adresse: "CRM (Adresse in der Mail)", manuell: "manuell zugeordnet" };
 
   const analysis = (draft?.analysis ?? {}) as { summary?: string; needs_human_reason?: string; toolCalls?: string[]; aiError?: string; awaits_reply?: boolean };
   const isOpen = !["beantwortet", "geschlossen", "wartet"].includes(t.status);
@@ -176,7 +183,7 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
 
           {tasks.length > 0 && (
             <section className="card p-4 space-y-2" data-testid="ticket-tasks">
-              <h2 className="font-semibold text-navy">Aufgaben in moovin</h2>
+              <h2 className="font-semibold text-navy">Aufgaben</h2>
               {tasks.map((k) => (
                 <div key={k.id} className="flex items-start gap-2 text-sm">
                   <form action={taskDoneAction.bind(null, Number(k.id), k.status !== "erledigt")}>
@@ -204,10 +211,22 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
             </section>
           )}
 
+          <section className="card p-4 space-y-2 text-sm" data-testid="object-card">
+            <h2 className="font-semibold text-navy">Objekt & Zuordnung</h2>
+            {t.object_id ? <div><div className="font-medium text-ink">{t.object_title ?? t.object_id}</div><div className="text-xs text-muted">{t.object_id}{obj?.customer ? ` · ${obj.customer}` : ""}{obj?.stage ? ` · ${obj.stage}` : ""}</div></div>
+              : <div className="text-muted">Kein Objekt erkannt.</div>}
+            {obj?.am_name && <div className="text-xs text-muted">AM laut CRM: <span className="text-ink">{obj.am_name}</span>{obj.am_email ? ` (${obj.am_email})` : ""}</div>}
+            {t.routing_source && <div className="text-xs text-muted">Zuordnung: {ROUTING[t.routing_source] ?? t.routing_source}</div>}
+            {t.routing_note && !t.assignee_email && <div className="text-xs text-amber-700">{t.routing_note}</div>}
+          </section>
+
           <section className="card p-4">
             <h2 className="font-semibold text-navy mb-3">Bewerber (live aus moovin)</h2>
+            {!moovinOn && (
+              <p className="text-sm text-amber-700" data-testid="moovin-off">moovin-Anbindung aus (Livetest): Bewerberdaten bitte direkt in moovin nachsehen. Vorgeschlagene Aktionen werden nach der Freigabe zu Aufgaben für den AM, nichts wird an moovin gesendet.</p>
+            )}
             {ctxError && <p className="text-sm text-pink">moovin nicht erreichbar: {ctxError}</p>}
-            {!ctx && !ctxError && (
+            {moovinOn && !ctx && !ctxError && (
               <p className="text-sm text-amber-700">Absender {t.sender_email} ist in moovin unbekannt. Die KI gibt keine persönlichen Daten heraus.</p>
             )}
             {ctx && (
@@ -234,7 +253,7 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
           </section>
           <section className="card p-4 text-xs text-muted space-y-1">
             <div className="font-semibold text-ink text-sm mb-1">Sicherheit</div>
-            <div>Antworten gehen nur an die in moovin hinterlegte Adresse.</div>
+            <div>{moovinOn ? "Antworten gehen nur an die in moovin hinterlegte Adresse." : "moovin-Anbindung aus: Antworten gehen an die Absenderadresse – persönliche Angaben nur nach Prüfung in moovin."}</div>
             <div>Claude sieht keine Anhänge und keine Scores.</div>
             {analysis.toolCalls && analysis.toolCalls.length > 0 && <div>KI-Werkzeuge: {analysis.toolCalls.join(", ")}</div>}
             <div>Deep-Link aus moovin: <code>/tickets?email={t.sender_email}</code></div>
