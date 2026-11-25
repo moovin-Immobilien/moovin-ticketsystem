@@ -4,6 +4,8 @@ KI-gestütztes Ticketsystem für Mails von Mietinteressenten an mieter@moovin.de
 Claude beantwortet Anliegen auf Basis einer Wissensdatenbank und Live-Daten aus moovin (über eine schmale,
 signierte API) und löst einfache Aktionen aus (Termin zu-/absagen, Unterlagen ablegen, Notizen).
 AMs arbeiten in „Mein Bereich“ (Zu erledigen, Aufgaben, Wartet, Automatisch erledigt), Login nur mit Google.
+Den zuständigen AM liefert moovin oder – über das in der Mail erkannte Objekt – das CRM (Zoho, täglich nur lesend).
+Für den Livetest lässt sich die moovin-Anbindung abschalten (Team → Objekte & Zuordnung): dann Platzhalter statt Bewerberdaten und Aufgaben statt moovin-Aktionen.
 
 - Anforderungen: [`docs/SPEC.md`](docs/SPEC.md)
 - API-Vertrag für moovin (IT): [`docs/moovin-api.openapi.yaml`](docs/moovin-api.openapi.yaml)

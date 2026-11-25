@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { sql } from "@/lib/db";
 import { requireAgent, visibleSql } from "@/lib/auth";
+import { moovinEnabled } from "@/lib/settings";
 import { StatusBadge, IntentBadge, ConfidenceBar, fmtDateTime } from "@/components/ui";
 
 const VIEWS = [
@@ -14,6 +15,7 @@ const VIEWS = [
 
 export default async function TicketsPage(props: PageProps<"/tickets">) {
   const agent = await requireAgent();
+  const moovinOn = await moovinEnabled();
   const sp = await props.searchParams;
   const view = (typeof sp.view === "string" ? sp.view : "offen") as (typeof VIEWS)[number]["key"];
   const email = typeof sp.email === "string" ? sp.email.toLowerCase().trim() : "";
@@ -100,7 +102,7 @@ export default async function TicketsPage(props: PageProps<"/tickets">) {
                     <IntentBadge intent={t.intent} />
                     {t.needs_human && !["beantwortet", "geschlossen"].includes(t.status) && <div className="text-xs text-pink mt-1">Mensch nötig</div>}
                   </td>
-                  <td className="px-4 py-3 text-muted max-w-[14rem] truncate">{t.object_title ?? (t.applicant_known ? "–" : <span className="text-amber-700">unbekannter Absender</span>)}</td>
+                  <td className="px-4 py-3 text-muted max-w-[14rem] truncate">{t.object_title ?? (t.applicant_known || !moovinOn ? "–" : <span className="text-amber-700">unbekannter Absender</span>)}</td>
                   <td className="px-4 py-3"><StatusBadge status={t.status} />{t.auto_handled && <div className="text-xs text-emerald-700 mt-1">automatisch</div>}</td>
                   <td className="px-4 py-3 whitespace-nowrap"><ConfidenceBar value={t.confidence} /></td>
                   <td className={`px-4 py-3 tabular-nums whitespace-nowrap ${overdue ? "text-pink font-semibold" : "text-muted"}`}>{["beantwortet", "geschlossen", "wartet"].includes(t.status) || !t.due_at ? "–" : fmtDateTime(t.due_at)}</td>
