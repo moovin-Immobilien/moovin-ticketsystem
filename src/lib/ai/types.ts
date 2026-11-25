@@ -22,6 +22,8 @@ export type AgentResult = {
   needs_human_reason: string;
   /** Antwort enthält eine Rückfrage, ohne deren Beantwortung das Anliegen nicht erledigt ist → Ticket „wartet auf Bewerber“ */
   awaits_reply?: boolean;
+  /** Ticket-Intelligenz: Hinweise aus dem Mailtext (feste Werte); der Server bestätigt sie und setzt die Stufe */
+  signals?: { type: string; evidence: string; deadline: string }[];
 };
 
 export type AgentInput = {
