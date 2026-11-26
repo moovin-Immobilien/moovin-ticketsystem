@@ -16,6 +16,8 @@ export type MailSetupStatus = {
   brevoKey: boolean;
   mx: { ok: boolean; hosts: string[] };
   senderDomain: { name: string; authenticated: boolean; verified: boolean } | null;
+  /** Absenderadresse (z. B. mieter@moovin.de) per Code bei Brevo bestätigt – reicht für den Versand, auch ohne DNS-Einträge der Domain. */
+  sender: { email: string; active: boolean } | null;
   webhook: { id: number; domain: string; urlOk: boolean } | null;
   error?: string;
 };
@@ -49,13 +51,17 @@ async function mxHosts(domain: string): Promise<string[]> {
 
 export async function mailSetupStatus(): Promise<MailSetupStatus> {
   const hosts = await mxHosts(INBOUND_DOMAIN);
-  const status: MailSetupStatus = { brevoKey: !!env.brevoApiKey(), mx: { ok: hosts.some((h) => BREVO_MX.includes(h)), hosts }, senderDomain: null, webhook: null };
+  const status: MailSetupStatus = { brevoKey: !!env.brevoApiKey(), mx: { ok: hosts.some((h) => BREVO_MX.includes(h)), hosts }, senderDomain: null, sender: null, webhook: null };
   if (!status.brevoKey) return status;
   try {
     const sender = env.fromAddress().match(/@([^>\s]+)/)?.[1]?.toLowerCase() ?? "moovin.de";
     const d = await brevo<{ domains?: { domain_name: string; authenticated?: boolean; verified?: boolean }[] }>("/senders/domains").catch(() => ({ domains: [] }));
     const dom = (d.domains ?? []).find((x) => x.domain_name?.toLowerCase() === sender);
     status.senderDomain = dom ? { name: dom.domain_name, authenticated: !!dom.authenticated, verified: !!dom.verified } : null;
+    const email = env.fromAddress().match(/<([^>]+)>/)?.[1]?.toLowerCase() ?? env.fromAddress().trim().toLowerCase();
+    const s = await brevo<{ senders?: { email: string; active?: boolean }[] }>("/senders").catch(() => ({ senders: [] }));
+    const snd = (s.senders ?? []).find((x) => x.email?.toLowerCase() === email);
+    status.sender = snd ? { email: snd.email, active: !!snd.active } : null;
     const h = (await inboundHooks()).find((x) => (x.domain ?? "").toLowerCase() === INBOUND_DOMAIN);
     status.webhook = h ? { id: h.id, domain: h.domain ?? "", urlOk: h.url === webhookUrl() } : null;
   } catch (e) {

@@ -57,7 +57,8 @@ export default async function Objekte(props: PageProps<"/objekte">) {
         <p className="text-sm text-muted max-w-3xl">mieter@moovin.de leitet an <code>mieter@{INBOUND_DOMAIN}</code> weiter; Brevo nimmt die Mails an und übergibt sie dem Ticketsystem. Antworten gehen über Brevo mit Absender mieter@moovin.de.</p>
         <ul className="text-sm space-y-1">
           <Check ok={mail.brevoKey} label="Brevo-API-Schlüssel in Vercel (BREVO_API_KEY)" />
-          <Check ok={!!mail.senderDomain?.authenticated} label={`Absenderdomain bei Brevo bestätigt${mail.senderDomain ? ` (${mail.senderDomain.name})` : ""}`} hint={mail.brevoKey && !mail.senderDomain ? "Domain in Brevo noch nicht angelegt" : undefined} />
+          <Check ok={!!mail.senderDomain?.authenticated || !!mail.sender?.active} label={`Absender bei Brevo bestätigt${mail.sender ? ` (${mail.sender.email})` : ""}`}
+            hint={mail.senderDomain?.authenticated ? "Domain per DNS authentifiziert" : mail.sender?.active ? "per Code bestätigt – Versand läuft; DNS-Einträge der Domain sind optional" : mail.brevoKey ? "Absender in Brevo anlegen und per Code bestätigen" : undefined} />
           <Check ok={mail.mx.ok} label={`MX-Einträge ${INBOUND_DOMAIN} → Brevo`} hint={mail.mx.hosts.length ? `aktuell: ${mail.mx.hosts.join(", ")}` : "noch keine MX-Einträge gefunden"} />
           <Check ok={!!mail.webhook?.urlOk} label="Brevo-Webhook für den Eingang eingerichtet" hint={mail.webhook && !mail.webhook.urlOk ? "zeigt auf eine andere Adresse – neu einrichten" : undefined} />
         </ul>
