@@ -1,6 +1,7 @@
 import "server-only";
 import { sql } from "./db";
 import { audit } from "./audit";
+import { env } from "./env";
 import { dueDate, addWorkingHours } from "./sla";
 import { followUpTasks, type Signal } from "./signals";
 
@@ -184,4 +185,34 @@ export async function maybeHousekeeping() {
   if (hk.__hk && now - hk.__hk < 10 * 60_000) return;
   hk.__hk = now;
   await housekeeping("system").catch((e) => console.error("housekeeping", e));
+}
+
+/**
+ * Löschkonzept (DSGVO): abgeschlossene Tickets ohne Aktivität seit `RETENTION_MONTHS` Monaten (Standard 6) endgültig löschen –
+ * mit Nachrichten, Anhängen, Entwürfen, Aktionen, Aufgaben, Notizen und Signal-Rückmeldungen (alles per ON DELETE CASCADE).
+ * Offene Tickets bleiben immer erhalten. Das Audit-Log bleibt (insert-only) und enthält nur die Ticket-Nummer.
+ * Läuft nur im täglichen Cron, in Paketen, damit keine langen Sperren entstehen.
+ */
+export async function purgeExpiredTickets(actor = "cron", batch = 500): Promise<{ deleted: number; months: number }> {
+  const months = env.retentionMonths();
+  if (months === 0) return { deleted: 0, months };
+  let deleted = 0;
+  for (let round = 0; round < 20; round++) {
+    const n = await sql.begin(async (tx) => {
+      const doomed = await tx`select id from ticket.tickets
+        where status in ('beantwortet','geschlossen')
+          and greatest(updated_at, coalesce(closed_at, updated_at), coalesce(last_inbound_at, updated_at)) < now() - make_interval(months => ${months})
+        order by id limit ${batch} for update skip locked`;
+      if (doomed.length === 0) return 0;
+      const ids = doomed.map((r) => Number(r.id));
+      // Verweise „zusammengeführt in“ auf zu löschende Tickets lösen (sonst blockiert der Fremdschlüssel)
+      await tx`update ticket.tickets set merged_into = null where merged_into = any(${ids}::bigint[]) and not (id = any(${ids}::bigint[]))`;
+      await tx`delete from ticket.tickets where id = any(${ids}::bigint[])`;
+      return ids.length;
+    });
+    deleted += n;
+    if (n < batch) break;
+  }
+  if (deleted > 0) await audit(actor, "ticket", { event: "loeschung", tickets: deleted, monate: months });
+  return { deleted, months };
 }

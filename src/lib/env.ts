@@ -44,6 +44,15 @@ export const env = {
   prototypePassword: () => process.env.PROTOTYPE_PASSWORD ?? "",
   // Vercel Cron (Authorization: Bearer <CRON_SECRET>)
   cronSecret: () => process.env.CRON_SECRET ?? "",
+  // Löschkonzept: abgeschlossene Tickets (inkl. Nachrichten und Anhängen) nach N Monaten ohne Aktivität löschen.
+  // Standard 6, erlaubt 1–36; "0" schaltet das Löschen ab (nur nach Absprache mit dem Datenschutz).
+  retentionMonths: (): number => {
+    const raw = process.env.RETENTION_MONTHS;
+    if (raw === undefined || raw.trim() === "") return 6;
+    const n = Number(raw);
+    if (n === 0) return 0;
+    return Number.isInteger(n) && n >= 1 && n <= 36 ? n : 6;
+  },
   // moovin-Anbindung: Standard „an“; „aus“ = Livetest ohne moovin-API (Schalter unter Objekte überschreibt das)
   moovinApiModeDefault: (): "an" | "aus" => (process.env.MOOVIN_API_MODE === "aus" ? "aus" : "an"),
   // Zoho CRM (nur lesend: Objekt → AM). Self Client mit Scopes ZohoCRM.coql.READ, ZohoCRM.modules.deals.READ, ZohoCRM.users.READ
