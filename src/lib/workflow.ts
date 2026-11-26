@@ -139,9 +139,9 @@ export async function leavePresence(ticketId: number, email: string) {
 export const WAIT_DAYS = 7;
 
 export async function housekeeping(actor = "system") {
-  // 1. Wartet seit 7 Tagen ohne Antwort → Hinweis-Aufgabe an den AM (keine Mail an den Bewerber)
+  // 1. Wartet seit 7 Tagen ohne Antwort → Hinweis-Aufgabe an den AM (keine Mail an den Bewerber); Testtickets nie
   const stale = await sql`update ticket.tickets set waiting_reminded_at = now()
-    where status = 'wartet' and waiting_reminded_at is null and waiting_since < now() - make_interval(days => ${WAIT_DAYS})
+    where status = 'wartet' and waiting_reminded_at is null and waiting_since < now() - make_interval(days => ${WAIT_DAYS}) and not is_test
     returning id, assignee_email`;
   for (const t of stale) {
     await createTask({ ticketId: Number(t.id), type: "nachfassen", assignee: t.assignee_email, createdBy: actor,

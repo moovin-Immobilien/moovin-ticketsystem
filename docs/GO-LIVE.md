@@ -32,6 +32,26 @@ Rückweg jederzeit: Weiterleitung von mieter@ an das Ticketsystem entfernen. Zoh
 4. **Wissen**: FAQ kurz gegenlesen (Unterlagen, Ablauf, Datenschutz, Login, Suchagent); Objekt-Ergänzungen für Pilot-Objekte (Parken, Haustiere, Treffpunkt).
 5. Pilot-AMs: einmal mit Google anmelden, **Mein Bereich** ansehen, Abwesenheit/Vertretung eintragen.
 
+## Testphase · Testbatterie (vor Phase 2, beliebig wiederholbar)
+
+Feste Testfälle (44 Mails, `src/lib/testbatterie.json`) laufen wie echte Mails durch das System – mit echten Objekten aus dem CRM, echter
+Zuordnung und echtem Claude –, aber als **Testtickets**: Für Testtickets geht **nie** eine Mail raus (weder an Bewerber noch an AMs oder
+datenschutz@), es gibt keinen Auto-Versand und keine Schreibaufrufe an moovin. Zusätzlich gilt für alle Tickets: An reservierte Testdomains
+(example.com/.org/.net, *.test, *.invalid, *.local, *.example) wird nie versendet.
+
+1. **Testmail → Abschnitt „Testbatterie“** (nur Admin): Fälle auswählen (Standard: alle) → *Testbatterie laden*. Je Fall ein Aufruf
+   (ca. 10–40 s), 3 parallel, Fortschritt und Fehler je Fall werden angezeigt; Folgemails laufen nach ihrem Vorgänger.
+   Kosten je Lauf ≈ 44 Claude-Aufrufe, grob 2–4 $.
+2. **Testbericht** (`/simulieren/bericht?run=…`, Link nach dem Lauf): je Fall Soll gegen Ist – Anliegen, Stufe, Signale, Fall B/C/D,
+   Zuordnung (Quelle, AM), Sprache, Auto, [AM: …]-Platzhalter, Aktion. Abweichungen rot, oben die Trefferquote für Anliegen und Stufe.
+   „Prüfen“-Hinweise (z. B. „keine fremden Daten, kein Score“) im Entwurf von Hand ansehen.
+3. Testtickets tragen das Badge **TEST**, zählen in keiner Kennzahl und sind für AMs ausgeblendet (Schalter „TEST ein/aus“ oben rechts).
+   Sie dürfen bei AMs landen (die Zuordnung wird mitgetestet). Im Ticket kann man „Freigeben & senden“ gefahrlos ausprobieren: Status „simuliert“.
+4. Prompt, Wissen oder Signale angepasst? Neuen Lauf starten und die Trefferquoten der Läufe vergleichen.
+5. **Aufräumen**: *Testtickets löschen* (je Lauf oder alle, mit Bestätigung) – entfernt Tickets samt Nachrichten, Entwürfen, Aktionen,
+   Aufgaben, Notizen, Anhängen und Signal-Rückmeldungen. Das Audit-Log bleibt (insert-only).
+6. Einzelne Testmails über das Formular darüber sind standardmäßig ebenfalls Testtickets (Haken „Als Testticket“).
+
 ## Phase 2 · Schattenbetrieb (1 Woche)
 
 1. **Google Workspace** (Admin-Konsole → Gmail → Routing): Für mieter@moovin.de eine Regel *zusätzlicher Empfänger* `mieter@reply.moovin.de`. Zoho Desk bekommt weiter alles.

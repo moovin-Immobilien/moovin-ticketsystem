@@ -14,7 +14,8 @@ import { moovinEnabled } from "./settings";
 export async function copyCorrespondence(ticketId: number): Promise<{ ok: boolean; stored?: number; error?: string; skipped?: string }> {
   if (!env.copyCorrespondence()) return { ok: true, skipped: "deaktiviert" };
   if (!(await moovinEnabled())) return { ok: true, skipped: "moovin-Anbindung aus" };
-  const [t] = await sql`select id, sender_email, applicant_id, application_id from ticket.tickets where id = ${ticketId}`;
+  const [t] = await sql`select id, sender_email, applicant_id, application_id, is_test from ticket.tickets where id = ${ticketId}`;
+  if (t?.is_test) return { ok: true, skipped: "Testticket" };
   if (!t?.applicant_id) return { ok: true, skipped: "Bewerber in moovin unbekannt" };
   const msgs = await sql`select id, direction, from_email, to_email, subject, body_text, sender_verified, sent_by, created_at
                          from ticket.messages where ticket_id = ${ticketId} and copied_to_moovin_at is null order by created_at asc limit 20`;

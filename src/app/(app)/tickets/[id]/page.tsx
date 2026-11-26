@@ -4,7 +4,7 @@ import { sql } from "@/lib/db";
 import { requireAgent, canSeeTicket } from "@/lib/auth";
 import { MoovinClient } from "@/lib/moovin/client";
 import type { ApplicantContext } from "@/lib/moovin/types";
-import { StatusBadge, IntentBadge, ConfidenceBar, fmtLong, VerifiedBadge } from "@/components/ui";
+import { StatusBadge, IntentBadge, ConfidenceBar, fmtLong, VerifiedBadge, TestBadge } from "@/components/ui";
 import { DraftPanel } from "./DraftPanel";
 import { Presence } from "./Presence";
 import { takeOverAction, assignAction, addNoteAction, handoverAction, mergeAction, reviewedAction, taskDoneAction, signalFeedbackAction } from "./actions";
@@ -58,6 +58,8 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
           <Link href="/tickets" className="text-xs text-muted hover:text-navy">← Tickets</Link>
           <h1 className="text-xl font-semibold text-navy mt-1">T-{t.id} · {t.subject || "(ohne Betreff)"}</h1>
           <div className="flex flex-wrap items-center gap-2 mt-2 text-sm">
+            <TestBadge isTest={t.is_test} />
+            {t.is_test && t.test_run && agent.role === "admin" && <Link href={`/simulieren/bericht?run=${t.test_run}`} className="text-xs underline text-violet-800">Lauf {t.test_run}</Link>}
             <StatusBadge status={t.status} />
             <IntentBadge intent={t.intent} />
             <VerifiedBadge verified={t.sender_verified} />

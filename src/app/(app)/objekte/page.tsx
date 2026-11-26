@@ -31,7 +31,7 @@ export default async function Objekte(props: PageProps<"/objekte">) {
   const [routing] = await sql`select count(*) filter (where routing_source = 'crm_id') as crm_id, count(*) filter (where routing_source = 'crm_adresse') as crm_adresse,
       count(*) filter (where routing_source = 'moovin') as moovin, count(*) filter (where routing_source = 'manuell') as manuell,
       count(*) filter (where assignee_email is null and status not in ('beantwortet','geschlossen') and merged_into is null) as pool
-    from ticket.tickets where created_at > now() - interval '30 days'`;
+    from ticket.tickets where created_at > now() - interval '30 days' and not is_test`;
 
   return (
     <div className="space-y-6" data-testid="objekte">

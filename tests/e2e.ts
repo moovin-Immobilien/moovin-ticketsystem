@@ -118,7 +118,7 @@ function startMock(): Promise<Server> {
       if (url.pathname === "/zoho/crm/v8/users") { res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ users: zoho.users, info: { more_records: false } })); return; }
       if (url.pathname === "/zoho/crm/v8/coql" && req.method === "POST") {
         const query = String(JSON.parse(body).select_query ?? "");
-        if (!/from Deals where Pipeline = 'Vermietung'/.test(query) || /limit [1-9]\d*,/.test(query)) { res.writeHead(204).end(); return; }
+        if (!/from Deals where \(?Pipeline = 'Vermietung'/.test(query) || /limit [1-9]\d*,/.test(query)) { res.writeHead(204).end(); return; }
         const data = /Stage not in/.test(query) ? zoho.open : /Modified_Time >= '/.test(query) ? zoho.recent : [];
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ data, info: { count: data.length, more_records: false } }));
         return;
@@ -229,6 +229,160 @@ async function sendFromUi(page: Page, ticketId: number, opts: { awaitReply?: boo
   await page.click('button:has-text("Freigeben & senden")');
   await until(async () => Number((await sql`select count(*) from ticket.messages where ticket_id = ${ticketId} and direction = 'out'`)[0].count) > before, 30_000);
   await wait(500);
+}
+
+// ---------- Testbatterie und Testsperre ----------
+async function testTicketViaForm(page: Page, o: { from: string; name: string; subject: string; body: string }) {
+  await page.goto(`${BASE}/simulieren`);
+  const f = page.locator('form:has(input[name="is_test"])');
+  await f.locator('input[name="from"]').fill(o.from);
+  await f.locator('input[name="name"]').fill(o.name);
+  await f.locator('input[name="subject"]').fill(o.subject);
+  await f.locator('textarea[name="body"]').fill(o.body);
+  if (await f.locator('input[name="attach"]').isChecked()) await f.locator('input[name="attach"]').click();
+  assert(await f.locator('input[name="is_test"]').isChecked(), "Testticket nicht vorausgewählt");
+  await Promise.all([page.waitForURL(/\/tickets\/\d+$/, { timeout: 60_000 }), f.locator('button:has-text("Mail einspielen")').click()]);
+  const id = Number(new URL(page.url()).pathname.split("/").pop());
+  return until(async () => (await sql`select * from ticket.tickets where id = ${id} and status <> 'neu'`)[0]);
+}
+
+async function testbatterie(admin: Page, lena: Page) {
+  console.log("\n15 Testbatterie und Testsperre");
+  let run = "";
+  let dashBefore = "";
+  const moovinWrites = async () => Number((await sql`select count(*) from mock_moovin.request_log where method = 'POST'`)[0].count);
+
+  await check("Testticket: Senden, Verschiebewunsch und Datenschutz → kein Request beim Brevo-Testserver, alles „simuliert“, kein moovin-Schreibaufruf", async () => {
+    await admin.goto(`${BASE}/dashboard`);
+    dashBefore = await admin.locator('[data-testid="dashboard"] .grid').first().innerText();
+    const sentBefore = brevo.sent.length;
+    const writesBefore = await moovinWrites();
+    // Verschiebewunsch (bekannte Bewerberin mit Termin → Aktion; beim Testticket als Aufgabe, Mail an den AM gesperrt)
+    const t = await testTicketViaForm(admin, { from: "julia.becker@example.net", name: "Julia Becker", subject: "Termin verschieben?", body: "Könnte ich den Besichtigungstermin auf Samstag verschieben?" });
+    assert(t.is_test && !t.test_run, `is_test ${t.is_test}`);
+    const [act] = await sql`select * from ticket.actions where ticket_id = ${t.id} and type = 'termin_verschieben_wunsch'`;
+    assert(act && act.payload.manual && act.status === "vorgeschlagen", `Aktion: ${JSON.stringify(act)}`);
+    assert(await admin.locator('[data-testid="badge-test"]').count() >= 1, "Badge TEST fehlt im Ticket");
+    await sendFromUi(admin, Number(t.id), { awaitReply: false });
+    const [a2] = await sql`select status, result from ticket.actions where id = ${act.id}`;
+    assert(a2.status === "ausgefuehrt" && a2.result.delivery === "simuliert", JSON.stringify(a2));
+    assert((await sql`select 1 from ticket.tasks where ticket_id = ${t.id} and type = 'verschiebewunsch'`).length, "keine Aufgabe");
+    // Datenschutz (Weiterleitung an datenschutz@moovin.de gesperrt)
+    const d = await testTicketViaForm(admin, { from: "erika.muster@example.org", name: "Erika Muster", subject: "DSGVO", body: "Bitte löschen Sie meine Daten gemäß DSGVO." });
+    const [dact] = await sql`select id from ticket.actions where ticket_id = ${d.id} and type = 'datenschutz_weiterleiten'`;
+    assert(dact, "keine Datenschutz-Aktion");
+    await sendFromUi(admin, Number(d.id), { awaitReply: false });
+    const [d2] = await sql`select status, result from ticket.actions where id = ${dact.id}`;
+    assert(d2.status === "ausgefuehrt" && d2.result.delivery === "simuliert", JSON.stringify(d2));
+    assert(brevo.sent.length === sentBefore, `Brevo aufgerufen: ${JSON.stringify(brevo.sent.slice(sentBefore).map((m) => (m as { to: unknown }).to))}`);
+    const outs = await sql`select delivery_status from ticket.messages where ticket_id in (${t.id}, ${d.id}) and direction = 'out'`;
+    assert(outs.length === 2 && outs.every((m) => m.delivery_status === "simuliert"), JSON.stringify(outs));
+    const locks = await sql`select detail from ticket.audit_log where ticket_id in (${t.id}, ${d.id}) and kind = 'mail_out'`;
+    assert(locks.length === 4 && locks.every((l) => l.detail.mode === "test_gesperrt"), JSON.stringify(locks.map((l) => l.detail)));
+    assert(locks.some((l) => String(l.detail.to).endsWith("@moovin.de") && l.detail.reason === "Testticket"), "interne Mail nicht über das Kennzeichen gesperrt");
+    assert((await moovinWrites()) === writesBefore, "Schreibaufruf an moovin");
+  });
+
+  await check("Testticket: kein Auto-Versand, auch wenn das Anliegen auf „auto“ steht", async () => {
+    await sql`update ticket.intent_settings set mode = 'auto', threshold = 0.5 where intent = 'bewerbungsstatus'`;
+    try {
+      const t = await testTicketViaForm(admin, { from: "mehmet.yilmaz@example.org", name: "Mehmet Yilmaz", subject: "Stand", body: "Gibt es Neuigkeiten zum Stand meiner Bewerbung?" });
+      assert(t.intent === "bewerbungsstatus" && !t.auto_handled && t.status === "entwurf", `${t.intent} auto=${t.auto_handled} ${t.status}`);
+      assert(!(await sql`select 1 from ticket.messages where ticket_id = ${t.id} and direction = 'out'`).length, "Antwort verschickt");
+    } finally {
+      await sql`update ticket.intent_settings set mode = 'entwurf' where intent = 'bewerbungsstatus'`;
+    }
+  });
+
+  await check("Testbatterie laden (Admin): Auswahl, Fortschritt, Laufkennung, Platzhalter aus dem CRM, Folgemail im selben Thread", async () => {
+    const sentBefore = brevo.sent.length;
+    await admin.goto(`${BASE}/simulieren`);
+    await admin.click('[data-testid="testbatterie"] button:has-text("Keine")');
+    for (const k of ["status_kurz", "nachgehakt_2", "objekt_haustier", "termin_verschieben", "datenschutz_loeschen", "allgemeine_suche", "bounce"]) {
+      await admin.locator(`[data-testid="case-${k}"] input[type="checkbox"]`).check();
+    }
+    await admin.click('[data-testid="testbatterie-start"]');
+    await admin.waitForSelector('[data-testid="testbatterie-report"]', { timeout: 180_000 });
+    run = (await admin.locator('[data-testid="testbatterie-run"]').innerText()).trim();
+    assert(/^\d{8}-\d{6}$/.test(run), `Lauf ${run}`);
+    const res = await sql`select * from ticket.test_results where test_run = ${run}`;
+    assert(res.length === 8 && res.every((r) => !r.error && r.ticket_id), `Ergebnisse: ${JSON.stringify(res.map((r) => [r.case_key, r.error]))}`);
+    const tickets = await sql`select * from ticket.tickets where test_run = ${run}`;
+    assert(tickets.length === 7 && tickets.every((t) => t.is_test), `Tickets ${tickets.length}`);
+    const byKey = new Map(res.map((r) => [String(r.case_key), r]));
+    const by = { get: (k: string) => { const r = byKey.get(k); assert(r, `Fall ${k} fehlt`); return r; } };
+    assert(by.get("nachgehakt_1").ticket_id === by.get("nachgehakt_2").ticket_id, "Folgemail nicht im selben Thread");
+    const [follow] = await sql`select in_reply_to from ticket.messages where mail_message_id = ${`<testbatterie-${run}-nachgehakt_2@test.local>`}`;
+    assert(follow?.in_reply_to === `<testbatterie-${run}-nachgehakt_1@test.local>`, JSON.stringify(follow));
+    // Platzhalter: Objekt aus dem CRM (live, aktiv, mit AM); {{ID}} = moovin-ID
+    const h = by.get("objekt_haustier");
+    const [o] = await sql`select * from ticket.crm_objects where object_id = ${h.object_id} and live and active and am_email is not null`;
+    const [hm] = await sql`select subject, body_text from ticket.messages where ticket_id = ${h.ticket_id} and direction = 'in'`;
+    assert(o && /^MV-/.test(o.object_id) && hm.subject.includes(o.object_id) && hm.body_text.includes(o.street) && !/\{\{/.test(hm.body_text), JSON.stringify({ o: o?.object_id, hm }));
+    assert(!by.get("datenschutz_loeschen").object_id && !by.get("allgemeine_suche").object_id, "Fall ohne Objekt hat Objekt");
+    // Zuordnung läuft echt: AM laut CRM, sofern im Ticketsystem freigeschaltet
+    const agent = (await sql`select 1 from ticket.agents where email = ${o.am_email} and active`).length > 0;
+    assert(agent ? h.actual.routing_source === "crm_id" && h.actual.assignee === o.am_email : !h.actual.assignee, JSON.stringify(h.actual));
+    const [m] = await sql`select actor from ticket.audit_log where ticket_id = ${h.ticket_id} and kind = 'mail_in'`;
+    assert(m.actor === `test:${ADMIN}`, m.actor);
+    assert(brevo.sent.length === sentBefore, "Brevo aufgerufen");
+  });
+
+  await check("Testbericht je Lauf: Soll/Ist, Trefferquote Anliegen und Stufe, Links zu den Tickets", async () => {
+    await admin.goto(`${BASE}/simulieren/bericht?run=${run}`);
+    const txt = await admin.locator('[data-testid="testbericht"]').innerText();
+    assert(txt.includes(`Lauf ${run}`) && /Trefferquote Anliegen\s*\d+ %/.test(txt) && /Trefferquote Stufe\s*\d+ %/.test(txt), txt.slice(0, 400));
+    for (const k of ["status_kurz", "nachgehakt_1", "nachgehakt_2", "bounce"]) assert(await admin.locator(`[data-testid="bericht-${k}"]`).count() === 1, `Zeile ${k}`);
+    assert(await admin.locator('[data-testid="bericht-bounce"] a[href^="/tickets/"]').count() === 1, "Link zum Ticket");
+    const bounce = await admin.locator('[data-testid="bericht-bounce"]').innerText();
+    assert(bounce.includes("intern_system"), bounce);
+  });
+
+  await check("Sichtbarkeit: Badge TEST, für AMs ausgeblendet (Schalter), nicht in Dashboard und Quoten", async () => {
+    await admin.goto(`${BASE}/tickets?view=offen`);
+    assert(await admin.locator('[data-testid="badge-test"]').count() > 0, "Admin sieht keine Testtickets");
+    const anyTest = await sql`select id, assignee_email from ticket.tickets where is_test and status not in ('beantwortet','geschlossen') order by id`;
+    await lena.goto(`${BASE}/tickets?view=offen`);
+    assert(await lena.locator('[data-testid="badge-test"]').count() === 0, "AM sieht Testtickets");
+    await lena.goto(`${BASE}/eingang`);
+    assert(await lena.locator('[data-testid="badge-test"]').count() === 0, "AM sieht Testtickets im Eingang");
+    await lena.goto(`${BASE}/mein`);
+    const lenaTest = anyTest.filter((t) => t.assignee_email === LENA);
+    for (const t of lenaTest) assert(await lena.locator(`[data-testid="row-${t.id}"]`).count() === 0, `T-${t.id} in Mein Bereich`);
+    // Schalter: AM kann einblenden
+    await lena.click('[data-testid="toggle-tests"]');
+    await lena.waitForSelector('[data-testid="toggle-tests"]:has-text("TEST ein")');
+    await lena.goto(`${BASE}/eingang`);
+    const poolTest = anyTest.filter((t) => !t.assignee_email);
+    if (poolTest.length) assert(await lena.locator('[data-testid="badge-test"]').count() > 0, "eingeblendet, aber nicht sichtbar");
+    await lena.click('[data-testid="toggle-tests"]');
+    await lena.waitForSelector('[data-testid="toggle-tests"]:has-text("TEST aus")');
+    // Kennzahlen unverändert
+    await admin.goto(`${BASE}/dashboard`);
+    assert((await admin.locator('[data-testid="dashboard"] .grid').first().innerText()) === dashBefore, "Dashboard zählt Testtickets");
+  });
+
+  await check("Testtickets löschen (je Lauf, mit Bestätigung): Tickets samt Nachrichten weg, Audit-Log bleibt", async () => {
+    const ids = (await sql`select id from ticket.tickets where test_run = ${run}`).map((r) => Number(r.id));
+    const auditBefore = Number((await sql`select count(*) from ticket.audit_log where ticket_id = any(${ids})`)[0].count);
+    await admin.goto(`${BASE}/simulieren`);
+    const f = admin.locator('[data-testid="testtickets-loeschen"]');
+    await f.locator('select[name="run"]').selectOption(run);
+    await f.locator('button:has-text("Löschen")').click();
+    await admin.waitForURL(/geloescht=bestaetigen/);
+    assert((await sql`select count(*) from ticket.tickets where test_run = ${run}`)[0].count === "7", "ohne Bestätigung gelöscht");
+    const f2 = admin.locator('[data-testid="testtickets-loeschen"]');
+    await f2.locator('select[name="run"]').selectOption(run);
+    await f2.locator('input[name="confirm"]').check();
+    await f2.locator('button:has-text("Löschen")').click();
+    await admin.waitForSelector('[data-testid="geloescht"]');
+    assert((await admin.locator('[data-testid="geloescht"]').innerText()).startsWith("7 "), await admin.locator('[data-testid="geloescht"]').innerText());
+    assert(!(await sql`select 1 from ticket.tickets where id = any(${ids})`).length && !(await sql`select 1 from ticket.messages where ticket_id = any(${ids})`).length, "Reste");
+    assert(!(await sql`select 1 from ticket.test_results where test_run = ${run}`).length, "Testergebnisse übrig");
+    assert(Number((await sql`select count(*) from ticket.audit_log where ticket_id = any(${ids})`)[0].count) === auditBefore, "Audit-Log verändert");
+    assert((await sql`select 1 from ticket.tickets where is_test`).length > 0, "andere Testtickets mitgelöscht");
+    assert((await sql`select 1 from ticket.tickets where not is_test`).length > 0, "echte Tickets gelöscht");
+  });
 }
 
 // ---------- Ablauf ----------
@@ -412,22 +566,38 @@ async function main() {
       await sql`update ticket.tickets set status = 'geschlossen' where id = ${t.id}`;
     });
     let brevoMsgId = "";
-    await check("Freigabe → Versand über Brevo, Message-ID gespeichert, Antwortadresse aus moovin", async () => {
+    await check("Testsperre: Freigabe an @example.org (normales Ticket) → kein Brevo-Aufruf, Status „simuliert“, Aktionen laufen", async () => {
+      const before = brevo.sent.length;
       await sendFromUi(lena, annaId, { awaitReply: false });
-      const last = brevo.sent.at(-1) as { to: { email: string }[]; replyTo: { email: string }; subject: string };
-      assert(last && last.to[0].email === "anna.schmidt@example.org" && /\[#T-\d+\]/.test(last.subject), JSON.stringify(last));
-      const [m] = await sql`select provider_message_id from ticket.messages where ticket_id = ${annaId} and direction = 'out'`;
-      brevoMsgId = m.provider_message_id; assert(/brevo-/.test(brevoMsgId ?? ""), "provider_message_id fehlt");
+      assert(brevo.sent.length === before, `Brevo aufgerufen: ${JSON.stringify(brevo.sent.slice(before))}`);
+      const [m] = await sql`select delivery_status, provider_message_id, to_email from ticket.messages where ticket_id = ${annaId} and direction = 'out'`;
+      assert(m.delivery_status === "simuliert" && !m.provider_message_id && m.to_email === "anna.schmidt@example.org", JSON.stringify(m));
+      assert((await sql`select 1 from ticket.audit_log where ticket_id = ${annaId} and kind = 'mail_out' and detail->>'mode' = 'test_gesperrt' and detail->>'reason' = 'Test-Domain'`).length, "Audit test_gesperrt fehlt");
       const [a] = await sql`select status from ticket.actions where ticket_id = ${annaId} and type = 'dokumente_ablegen'`;
       assert(a?.status === "ausgefuehrt", `Dokumente: ${a?.status}`);
     });
+    let extId = 0;
+    await check("Freigabe → Versand über Brevo, Message-ID gespeichert (Empfänger außerhalb der Test-Domains)", async () => {
+      const t = await mailIn({ from: "kim.extern@e2e-mieter.de", name: "Kim Extern", subject: "Frage", text: "Wie ist der Stand meiner Bewerbung?" });
+      extId = Number(t.id);
+      await sendFromUi(lena, extId, { awaitReply: false });
+      const last = brevo.sent.at(-1) as { to: { email: string }[]; replyTo: { email: string }; subject: string };
+      assert(last && last.to[0].email === "kim.extern@e2e-mieter.de" && last.replyTo.email && /\[#T-\d+\]/.test(last.subject), JSON.stringify(last));
+      const [m] = await sql`select provider_message_id, delivery_status from ticket.messages where ticket_id = ${extId} and direction = 'out'`;
+      brevoMsgId = m.provider_message_id; assert(/brevo-/.test(brevoMsgId ?? "") && m.delivery_status === "gesendet", "provider_message_id fehlt");
+    });
     await check("Geschlossenes Ticket: Antwort (In-Reply-To = Brevo-ID, ohne [#T]) öffnet es wieder", async () => {
+      await sql`update ticket.tickets set status = 'geschlossen', closed_at = now() where id = ${extId}`;
+      const t = await mailIn({ from: "kim.extern@e2e-mieter.de", name: "Kim Extern", subject: "AW: Ihre Anfrage", text: "Danke! Und wie geht es weiter?", inReplyTo: brevoMsgId });
+      assert(Number(t.id) === extId, `neues Ticket ${t.id} statt ${extId}`);
+      assert(t.status === "entwurf" && t.reopened_at, `Status ${t.status}`);
+      assert((await sql`select 1 from ticket.audit_log where ticket_id = ${extId} and detail->>'event' = 'wiedereroeffnet'`).length, "Audit fehlt");
+      await sql`update ticket.tickets set status = 'geschlossen', closed_at = now() where id = ${extId}`;
+      // Annas Ticket (Antwort war wegen Test-Domain nur simuliert) über [#T-…] im Betreff wieder öffnen – die folgenden Tests arbeiten damit weiter
       await lena.goto(`${BASE}/tickets/${annaId}`);
       await sql`update ticket.tickets set status = 'geschlossen', closed_at = now() where id = ${annaId}`;
-      const t = await mailIn({ from: "anna.schmidt@example.org", name: "Anna Schmidt", subject: "AW: Ihre Unterlagen", text: "Danke! Wie ist der Stand?", inReplyTo: brevoMsgId });
-      assert(Number(t.id) === annaId, `neues Ticket ${t.id} statt ${annaId}`);
-      assert(t.status === "entwurf" && t.reopened_at, `Status ${t.status}`);
-      assert((await sql`select 1 from ticket.audit_log where ticket_id = ${annaId} and detail->>'event' = 'wiedereroeffnet'`).length, "Audit fehlt");
+      const a = await mailIn({ from: "anna.schmidt@example.org", name: "Anna Schmidt", subject: `AW: Ihre Unterlagen [#T-${annaId}]`, text: "Danke! Wie ist der Stand?" });
+      assert(Number(a.id) === annaId && a.status === "entwurf" && a.reopened_at, `Anna: ${a.id} ${a.status}`);
     });
 
     console.log("\n3 Allgemeiner Eingang");
@@ -816,11 +986,15 @@ async function main() {
       for (const s of ["Offene Chancen", "Chancen älter als 2 h", "Reaktion Stufe 1", "Chance → Zusage", "Eskalationen offen", "Offene Chancen je AM"]) assert(txt.includes(s), `fehlt: ${s}`);
     });
 
-    console.log("\n15 Leitplanken");
-    await check("Keine Mail an Bewerber ohne Freigabe/Auto-Regel (keine proaktiven Mails)", async () => {
-      const toApplicants = brevo.sent.filter((m) => !String((m as { to: { email: string }[] }).to[0].email).endsWith("@moovin.de"));
-      const outs = await sql`select count(*) from ticket.messages where direction = 'out'`;
+    await testbatterie(admin, lena);
+
+    console.log("\n16 Leitplanken");
+    await check("Keine Mail an Bewerber ohne Freigabe/Auto-Regel (keine proaktiven Mails), nie an Test-Domains", async () => {
+      const to = (m: unknown) => String((m as { to: { email: string }[] }).to[0].email);
+      const toApplicants = brevo.sent.filter((m) => !to(m).endsWith("@moovin.de"));
+      const outs = await sql`select count(*) from ticket.messages where direction = 'out' and delivery_status = 'gesendet'`;
       assert(toApplicants.length === Number(outs[0].count), `${toApplicants.length} Mails vs. ${outs[0].count} Antworten`);
+      assert(!brevo.sent.some((m) => /@(.+\.)?example\.(com|org|net)$|\.(test|invalid|local|example)$/.test(to(m))), "Mail an Test-Domain");
     });
     await check("Audit-Log bleibt insert-only", async () => {
       let blocked = false;

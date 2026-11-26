@@ -29,6 +29,7 @@ export function SimForm({ samples }: { samples: readonly Sample[] }) {
       <div className="flex flex-wrap gap-6 text-sm">
         <label className="flex items-center gap-2"><input type="checkbox" name="verified" defaultChecked className="accent-navy" /> Absender verifiziert (DKIM/DMARC pass)</label>
         <label className="flex items-center gap-2"><input type="checkbox" name="attach" defaultChecked={s.attach} className="accent-navy" /> 2 PDF-Anhänge mitschicken</label>
+        <label className="flex items-center gap-2"><input type="checkbox" name="is_test" defaultChecked className="accent-navy" /> Als Testticket (TEST: kein Versand, nicht in Kennzahlen)</label>
       </div>
       <Submit />
     </form>

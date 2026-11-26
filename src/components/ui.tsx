@@ -41,6 +41,12 @@ export function fmtLong(d: Date | string | null | undefined) {
   return new Intl.DateTimeFormat("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(d));
 }
 
+/** Kennzeichen für Testtickets (Testbatterie/Testmail): kein Versand, nicht in Kennzahlen. */
+export function TestBadge({ isTest }: { isTest?: boolean | null }) {
+  if (!isTest) return null;
+  return <span className="badge bg-violet-100 text-violet-800 font-semibold" title="Testticket: es geht nie eine Mail raus, zählt nicht in Kennzahlen" data-testid="badge-test">TEST</span>;
+}
+
 export function VerifiedBadge({ verified }: { verified: boolean }) {
   return verified
     ? <span className="badge bg-emerald-50 text-emerald-700" title="DKIM/DMARC bestanden">✓ Absender verifiziert</span>
