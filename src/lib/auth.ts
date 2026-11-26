@@ -145,3 +145,18 @@ export function visibleSql(agent: Agent) {
     ? sql`true`
     : sql`(t.assignee_email = ${agent.email} or t.assignee_email is null or (t.due_at < now() and t.status not in ('beantwortet','geschlossen')))`;
 }
+
+// ---------- Testtickets (Testbatterie) ----------
+
+export const TEST_COOKIE = "mt_tests";
+
+/** Testtickets in Listen zeigen? Schalter je Browser (Cookie); Standard: Admin ein, AM aus. */
+export async function showTestTickets(agent: Agent): Promise<boolean> {
+  const v = (await cookies()).get(TEST_COOKIE)?.value;
+  return v === "1" ? true : v === "0" ? false : agent.role === "admin";
+}
+
+/** SQL-Bedingung für Listen (Alias t): Testtickets ausblenden, wenn der Schalter aus ist. Kennzahlen nutzen immer `not t.is_test`. */
+export function testSql(show: boolean) {
+  return show ? sql`true` : sql`not t.is_test`;
+}

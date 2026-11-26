@@ -1,18 +1,19 @@
 import Link from "next/link";
 import { sql } from "@/lib/db";
-import { requireAgent } from "@/lib/auth";
+import { requireAgent, showTestTickets, testSql } from "@/lib/auth";
 import { knownObjects } from "@/lib/objects";
-import { StatusBadge, IntentBadge, fmtDateTime } from "@/components/ui";
+import { StatusBadge, IntentBadge, fmtDateTime, TestBadge } from "@/components/ui";
 import { assignAction, taskDoneAction } from "../tickets/[id]/actions";
 
 /** Allgemeiner Eingang: alles ohne zuständigen AM. Zuordnung per Klick zu Objekt und/oder AM (Audit-Log). */
 export default async function Eingang() {
-  await requireAgent();
+  const agent = await requireAgent();
+  const tests = testSql(await showTestTickets(agent));
   const rows = await sql`select t.*, d.name as deputy_for_name from ticket.tickets t left join ticket.agents d on d.email = t.deputy_for
-    where t.assignee_email is null and t.status not in ('beantwortet','geschlossen') and t.merged_into is null
+    where t.assignee_email is null and t.status not in ('beantwortet','geschlossen') and t.merged_into is null and ${tests}
     order by case when t.due_at < now() then 0 else 1 end, t.due_at nulls last, t.created_at`;
   const tasks = await sql`select k.*, t.sender_name, t.sender_email from ticket.tasks k join ticket.tickets t on t.id = k.ticket_id
-    where k.assignee_email is null and k.status = 'offen' order by k.created_at`;
+    where k.assignee_email is null and k.status = 'offen' and ${tests} order by k.created_at`;
   const agents = await sql`select email, name from ticket.agents where active order by name`;
   const objects = await knownObjects();
 
@@ -44,7 +45,7 @@ export default async function Eingang() {
               const overdue = t.due_at && new Date(t.due_at) < new Date() && t.status !== "wartet";
               return (
                 <tr key={t.id} className="border-t border-line align-top" data-testid={`eingang-${t.id}`}>
-                  <td className="px-4 py-3 text-muted tabular-nums"><Link href={`/tickets/${t.id}`}>T-{t.id}</Link></td>
+                  <td className="px-4 py-3 text-muted tabular-nums"><Link href={`/tickets/${t.id}`}>T-{t.id}</Link>{t.is_test && <div className="mt-1"><TestBadge isTest /></div>}</td>
                   <td className="px-4 py-3">
                     <Link href={`/tickets/${t.id}`} className="font-medium text-ink">{t.sender_name || t.sender_email}</Link>
                     <div className="text-muted truncate max-w-xs">{t.subject || "(ohne Betreff)"}</div>
