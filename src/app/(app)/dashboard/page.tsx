@@ -7,44 +7,44 @@ export default async function Dashboard() {
   await requireAdmin();
   const perDay = await sql`select to_char(d, 'DD.MM.') as label, coalesce(n, 0)::int as n
     from generate_series((now() at time zone 'Europe/Berlin')::date - 13, (now() at time zone 'Europe/Berlin')::date, '1 day') d
-    left join (select (created_at at time zone 'Europe/Berlin')::date as day, count(*) as n from ticket.tickets where merged_into is null group by 1) x on x.day = d
+    left join (select (created_at at time zone 'Europe/Berlin')::date as day, count(*) as n from ticket.tickets where merged_into is null and not is_test group by 1) x on x.day = d
     order by d`;
   const perWeek = await sql`select 'KW ' || to_char(w, 'IW') as label, coalesce(n, 0)::int as n
     from generate_series(date_trunc('week', now() at time zone 'Europe/Berlin') - interval '7 weeks', date_trunc('week', now() at time zone 'Europe/Berlin'), '1 week') w
-    left join (select date_trunc('week', created_at at time zone 'Europe/Berlin') as wk, count(*) as n from ticket.tickets where merged_into is null group by 1) x on x.wk = w
+    left join (select date_trunc('week', created_at at time zone 'Europe/Berlin') as wk, count(*) as n from ticket.tickets where merged_into is null and not is_test group by 1) x on x.wk = w
     order by w`;
   const [rt] = await sql`select
       percentile_cont(0.5) within group (order by extract(epoch from first_response_at - created_at) / 60) as median,
       percentile_cont(0.9) within group (order by extract(epoch from first_response_at - created_at) / 60) as p90,
       count(*) as n
-    from ticket.tickets where first_response_at is not null and created_at > now() - interval '30 days'`;
+    from ticket.tickets where first_response_at is not null and created_at > now() - interval '30 days' and not is_test`;
   const [st] = await sql`select
       count(*) filter (where status not in ('beantwortet','geschlossen','wartet')) as offen,
       count(*) filter (where status not in ('beantwortet','geschlossen','wartet') and due_at < now()) as ueberfaellig,
       count(*) filter (where status = 'wartet') as wartet,
       count(*) filter (where status not in ('beantwortet','geschlossen') and assignee_email is null) as eingang
-    from ticket.tickets where merged_into is null`;
+    from ticket.tickets where merged_into is null and not is_test`;
   const auto = await sql`select intent, count(*) as total, count(*) filter (where auto_handled) as auto
-    from ticket.tickets where first_response_at is not null and created_at > now() - interval '30 days' and intent is not null
+    from ticket.tickets where first_response_at is not null and created_at > now() - interval '30 days' and intent is not null and not is_test
     group by intent order by count(*) desc`;
   const tasks = await sql`select coalesce(a.name, 'Allgemeiner Eingang') as name, count(*) filter (where k.status = 'offen') as offen,
       count(*) filter (where k.status = 'offen' and k.due_at < now()) as ueberfaellig
-    from ticket.tasks k left join ticket.agents a on a.email = k.assignee_email group by 1 having count(*) filter (where k.status = 'offen') > 0 order by 2 desc`;
+    from ticket.tasks k join ticket.tickets tt on tt.id = k.ticket_id and not tt.is_test left join ticket.agents a on a.email = k.assignee_email group by 1 having count(*) filter (where k.status = 'offen') > 0 order by 2 desc`;
   // Ticket-Intelligenz: offene Chancen (Stufe 1) je AM, Chancen älter als 2 h, Reaktionszeit Stufe 1, Chance → Zusage
   const chances = await sql`select coalesce(a.name, 'Allgemeiner Eingang') as name,
       count(*) as offen, count(*) filter (where x.since < now() - interval '2 hours') as alt
     from (select t.assignee_email, t.chance_at as since from ticket.tickets t
-            where t.priority = 1 and t.status in ('neu','in_bearbeitung','entwurf') and t.merged_into is null
+            where t.priority = 1 and t.status in ('neu','in_bearbeitung','entwurf') and t.merged_into is null and not t.is_test
           union all
-          select k.assignee_email, k.created_at from ticket.tasks k where k.priority = 1 and k.status = 'offen') x
+          select k.assignee_email, k.created_at from ticket.tasks k join ticket.tickets tt on tt.id = k.ticket_id and not tt.is_test where k.priority = 1 and k.status = 'offen') x
     left join ticket.agents a on a.email = x.assignee_email group by 1 order by 2 desc`;
   const [ch] = await sql`select
       percentile_cont(0.5) within group (order by extract(epoch from chance_answered_at - chance_at) / 60) filter (where chance_answered_at is not null) as median,
       percentile_cont(0.9) within group (order by extract(epoch from chance_answered_at - chance_at) / 60) filter (where chance_answered_at is not null) as p90,
       count(*) as n, count(*) filter (where chance_won_at is not null) as won,
       count(*) filter (where chance_answered_at is not null and chance_answered_at - chance_at <= interval '2 hours') as fast
-    from ticket.tickets where chance_at > now() - interval '30 days'`;
-  const [esc] = await sql`select count(*) as n from ticket.tickets where status not in ('beantwortet','geschlossen') and merged_into is null
+    from ticket.tickets where chance_at > now() - interval '30 days' and not is_test`;
+  const [esc] = await sql`select count(*) as n from ticket.tickets where status not in ('beantwortet','geschlossen') and merged_into is null and not is_test
     and signals @> '[{"type":"eskalation"}]'::jsonb`;
   const openChances = chances.reduce((n, c) => n + Number(c.offen), 0);
   const oldChances = chances.reduce((n, c) => n + Number(c.alt), 0);

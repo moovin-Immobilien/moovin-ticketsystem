@@ -16,15 +16,16 @@ export default async function AutonomiePage() {
       count(d.id) filter (where d.status = 'gesendet' and d.decided_by = 'ki') as auto_sent,
       avg(d.similarity) filter (where d.status = 'gesendet' and d.decided_by <> 'ki') as avg_sim
     from ticket.intent_settings s
-    left join ticket.tickets t on t.intent = s.intent
+    left join ticket.tickets t on t.intent = s.intent and not t.is_test
     left join ticket.drafts d on d.ticket_id = t.id and d.analysis->>'intent' = s.intent and d.created_at > now() - interval '60 days'
     group by s.intent order by s.locked, s.label`;
   // Trefferquote je Signal (60 Tage): markierte Tickets vs. „Markierung passt nicht“
   const sig = await sql`
     with marked as (
       select e->>'type' as signal, count(distinct t.id) as n from ticket.tickets t, jsonb_array_elements(t.signals) e
-      where t.created_at > now() - interval '60 days' group by 1),
-    wrong as (select signal, count(*) as n from ticket.signal_feedback where created_at > now() - interval '60 days' group by 1)
+      where t.created_at > now() - interval '60 days' and not t.is_test group by 1),
+    wrong as (select f.signal, count(*) as n from ticket.signal_feedback f join ticket.tickets t on t.id = f.ticket_id and not t.is_test
+              where f.created_at > now() - interval '60 days' group by 1)
     select coalesce(m.signal, w.signal) as signal, coalesce(m.n, 0) as marked, coalesce(w.n, 0) as wrong
     from marked m full join wrong w on w.signal = m.signal`;
   const sigBy = new Map(sig.map((x) => [String(x.signal), x]));
