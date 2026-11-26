@@ -1,9 +1,9 @@
 import Link from "next/link";
 import { sql } from "@/lib/db";
-import { requireAgent } from "@/lib/auth";
+import { requireAgent, showTestTickets, testSql } from "@/lib/auth";
 import { maybeHousekeeping, WAIT_DAYS } from "@/lib/workflow";
 import { INTENT_LABEL, INTENTS, type Intent } from "@/lib/intents";
-import { StatusBadge, IntentBadge, fmtDateTime, fmtLong } from "@/components/ui";
+import { StatusBadge, IntentBadge, fmtDateTime, fmtLong, TestBadge } from "@/components/ui";
 import { taskDoneAction, reviewedAction, closeAction } from "../tickets/[id]/actions";
 import { markClass, WhyLine } from "@/components/signals";
 import type { Signal } from "@/lib/signals";
@@ -23,15 +23,17 @@ export default async function MeinBereich(props: PageProps<"/mein">) {
   const tab = (TABS.some((t) => t.key === sp.tab) || sp.tab === "chancen" ? sp.tab : "todo") as Tab | "chancen";
   const intentFilter = typeof sp.anliegen === "string" && INTENTS.includes(sp.anliegen as Intent) ? sp.anliegen : "";
   const me = agent.email;
+  // Testtickets: für AMs standardmäßig ausgeblendet (Schalter „TEST ein/aus“), Admins sehen sie
+  const tests = testSql(await showTestTickets(agent));
 
   const [c] = await sql`
     select
-      (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf')) as todo,
-      (select count(*) from ticket.tasks k where k.assignee_email = ${me} and k.status = 'offen') as aufgaben,
-      (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.status = 'wartet') as wartet,
-      (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.auto_handled and t.reviewed_at is null and t.merged_into is null) as auto_unread,
-      (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf') and t.priority = 1)
-        + (select count(*) from ticket.tasks k where k.assignee_email = ${me} and k.status = 'offen' and k.priority = 1) as chancen`;
+      (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf') and ${tests}) as todo,
+      (select count(*) from ticket.tasks k join ticket.tickets t on t.id = k.ticket_id where k.assignee_email = ${me} and k.status = 'offen' and ${tests}) as aufgaben,
+      (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.status = 'wartet' and ${tests}) as wartet,
+      (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.auto_handled and t.reviewed_at is null and t.merged_into is null and ${tests}) as auto_unread,
+      (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf') and t.priority = 1 and ${tests})
+        + (select count(*) from ticket.tasks k join ticket.tickets t on t.id = k.ticket_id where k.assignee_email = ${me} and k.status = 'offen' and k.priority = 1 and ${tests}) as chancen`;
 
   return (
     <div className="space-y-5">
@@ -62,18 +64,20 @@ export default async function MeinBereich(props: PageProps<"/mein">) {
         })}
       </div>
 
-      {tab === "chancen" && <Chancen me={me} />}
-      {tab === "todo" && <Todo me={me} />}
-      {tab === "aufgaben" && <Aufgaben me={me} />}
-      {tab === "wartet" && <Wartet me={me} />}
-      {tab === "auto" && <Auto me={me} intent={intentFilter} />}
+      {tab === "chancen" && <Chancen me={me} tests={tests} />}
+      {tab === "todo" && <Todo me={me} tests={tests} />}
+      {tab === "aufgaben" && <Aufgaben me={me} tests={tests} />}
+      {tab === "wartet" && <Wartet me={me} tests={tests} />}
+      {tab === "auto" && <Auto me={me} intent={intentFilter} tests={tests} />}
     </div>
   );
 }
 
-async function Todo({ me }: { me: string }) {
+type Frag = ReturnType<typeof testSql>;
+
+async function Todo({ me, tests }: { me: string; tests: Frag }) {
   const rows = await sql`select t.*, (select count(*) from ticket.tasks k where k.ticket_id = t.id and k.status = 'offen') as open_tasks
-    from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf')
+    from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf') and ${tests}
     order by ${queueOrder()}, t.due_at asc nulls last, t.created_at`;
   return <TicketTable rows={rows} empty="Nichts zu erledigen." extra={todoExtra} />;
 }
@@ -96,21 +100,21 @@ function todoExtra(t: Row) {
 }
 
 /** „Chancen“: offene Abschluss-Chancen (Stufe 1) – Tickets und Aufgaben. */
-async function Chancen({ me }: { me: string }) {
+async function Chancen({ me, tests }: { me: string; tests: Frag }) {
   const rows = await sql`select t.*, (select count(*) from ticket.tasks k where k.ticket_id = t.id and k.status = 'offen') as open_tasks
-    from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf') and t.priority = 1
+    from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf') and t.priority = 1 and ${tests}
     order by t.due_at asc nulls last, t.created_at`;
   return (
     <div className="space-y-4">
       <TicketTable rows={rows} empty="Keine offenen Abschluss-Chancen in „Zu erledigen“." extra={todoExtra} />
-      <Aufgaben me={me} onlyChances />
+      <Aufgaben me={me} tests={tests} onlyChances />
     </div>
   );
 }
 
-async function Aufgaben({ me, onlyChances }: { me: string; onlyChances?: boolean }) {
-  const rows = await sql`select k.*, t.sender_name, t.sender_email, t.object_title from ticket.tasks k join ticket.tickets t on t.id = k.ticket_id
-    where k.assignee_email = ${me} and k.status = 'offen' ${onlyChances ? sql`and k.priority = 1` : sql``}
+async function Aufgaben({ me, tests, onlyChances }: { me: string; tests: Frag; onlyChances?: boolean }) {
+  const rows = await sql`select k.*, t.sender_name, t.sender_email, t.object_title, t.is_test from ticket.tasks k join ticket.tickets t on t.id = k.ticket_id
+    where k.assignee_email = ${me} and k.status = 'offen' and ${tests} ${onlyChances ? sql`and k.priority = 1` : sql``}
     order by case when k.priority = 1 then 0 when k.priority = 2 then 1 when k.due_at < now() then 2 else 3 end, k.due_at nulls last, k.created_at`;
   if (!rows.length) return onlyChances ? null : <div className="card p-8 text-center text-muted">Keine offenen Aufgaben.</div>;
   return (
@@ -129,7 +133,7 @@ async function Aufgaben({ me, onlyChances }: { me: string; onlyChances?: boolean
                 {k.text}
               </div>
               <div className="text-xs text-muted">
-                <Link className="underline" href={`/tickets/${k.ticket_id}`}>T-{k.ticket_id}</Link> · {k.sender_name || k.sender_email}{k.object_title ? ` · ${k.object_title}` : ""} · <span className="badge bg-canvas">{k.type}</span>
+                <Link className="underline" href={`/tickets/${k.ticket_id}`}>T-{k.ticket_id}</Link> <TestBadge isTest={k.is_test} /> · {k.sender_name || k.sender_email}{k.object_title ? ` · ${k.object_title}` : ""} · <span className="badge bg-canvas">{k.type}</span>
               </div>
             </div>
             <div className={`text-xs tabular-nums whitespace-nowrap ${overdue ? "text-pink font-semibold" : "text-muted"}`}>{fmtDateTime(k.due_at)}</div>
@@ -140,9 +144,9 @@ async function Aufgaben({ me, onlyChances }: { me: string; onlyChances?: boolean
   );
 }
 
-async function Wartet({ me }: { me: string }) {
+async function Wartet({ me, tests }: { me: string; tests: Frag }) {
   const rows = await sql`select t.*, extract(day from now() - t.waiting_since)::int as days from ticket.tickets t
-    where t.assignee_email = ${me} and t.status = 'wartet' order by t.waiting_since`;
+    where t.assignee_email = ${me} and t.status = 'wartet' and ${tests} order by t.waiting_since`;
   return (
     <TicketTable rows={rows} empty="Keine Rückfragen offen." extra={(t) => (
       <span className={`text-xs ${Number(t.days) >= WAIT_DAYS ? "text-pink font-semibold" : "text-muted"}`}>
@@ -152,11 +156,12 @@ async function Wartet({ me }: { me: string }) {
   );
 }
 
-async function Auto({ me, intent }: { me: string; intent: string }) {
+async function Auto({ me, intent, tests }: { me: string; intent: string; tests: Frag }) {
+  // Quote: Testtickets zählen nie mit
   const [q] = await sql`select count(*) filter (where auto_handled) as auto, count(*) as total from ticket.tickets
-    where assignee_email = ${me} and first_response_at > now() - interval '30 days'`;
+    where assignee_email = ${me} and first_response_at > now() - interval '30 days' and not is_test`;
   const quote = Number(q.total) ? Math.round((Number(q.auto) / Number(q.total)) * 100) : 0;
-  const rows = await sql`select t.* from ticket.tickets t where t.assignee_email = ${me} and t.auto_handled and t.merged_into is null
+  const rows = await sql`select t.* from ticket.tickets t where t.assignee_email = ${me} and t.auto_handled and t.merged_into is null and ${tests}
     ${intent ? sql`and t.intent = ${intent}` : sql``} order by (t.reviewed_at is null) desc, t.first_response_at desc limit 200`;
   const intents = await sql`select distinct intent from ticket.tickets where assignee_email = ${me} and auto_handled and intent is not null order by 1`;
   return (
@@ -195,7 +200,7 @@ function TicketTable({ rows, empty, extra }: { rows: readonly Row[]; empty: stri
             const overdue = t.due_at && new Date(t.due_at) < new Date() && !["beantwortet", "geschlossen", "wartet"].includes(t.status);
             return (
               <tr key={t.id} className="border-t border-line first:border-t-0 hover:bg-canvas/60" data-testid={`row-${t.id}`} data-priority={String(t.priority ?? 3)}>
-                <td className={`px-4 py-3 text-muted tabular-nums whitespace-nowrap ${markClass(t.priority, t.signals as Signal[])}`}><Link href={`/tickets/${t.id}`}>T-{t.id}</Link></td>
+                <td className={`px-4 py-3 text-muted tabular-nums whitespace-nowrap ${markClass(t.priority, t.signals as Signal[])}`}><Link href={`/tickets/${t.id}`}>T-{t.id}</Link>{t.is_test && <div className="mt-1"><TestBadge isTest /></div>}</td>
                 <td className="px-4 py-3">
                   <Link href={`/tickets/${t.id}`} className="block">
                     <div className="font-medium text-ink">{t.sender_name || t.sender_email}</div>
