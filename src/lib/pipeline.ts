@@ -49,7 +49,14 @@ function trustedAuthServ(): string[] {
 
 // ---------- Eingang ----------
 
-export async function processInbound(mail: InboundMail, actor = "webhook", warnings: string[] = []): Promise<{ ticketId: number; duplicate: boolean }> {
+export type InboundOptions = {
+  /** Testticket (Testbatterie/Testmail): kein Versand, kein Auto-Versand, keine moovin-Schreibaufrufe, nicht in Kennzahlen */
+  isTest?: boolean;
+  /** Laufkennung der Testbatterie (nur mit isTest) */
+  testRun?: string | null;
+};
+
+export async function processInbound(mail: InboundMail, actor = "webhook", warnings: string[] = [], opts: InboundOptions = {}): Promise<{ ticketId: number; duplicate: boolean }> {
   if (!mail.fromEmail || !mail.fromEmail.includes("@")) throw new Error("Absender fehlt");
 
   if (mail.messageId) {
@@ -62,6 +69,11 @@ export async function processInbound(mail: InboundMail, actor = "webhook", warni
 
   // Threading: 1) eigene/vom Versanddienst vergebene Message-ID in In-Reply-To/References, 2) [#T-123] im Betreff,
   // 3) offenes Ticket desselben Absenders < 14 Tage. Geschlossene Tickets werden über 1) und 2) wieder geöffnet.
+  // Testmails threaden nur in Testtickets desselben Laufs (nie in echte Tickets, nie in frühere Läufe).
+  // Echte Mails in einen Test-Thread erben das Kennzeichen über das Ticket.
+  const isTest = !!opts.isTest;
+  const testRun = isTest ? opts.testRun ?? null : null;
+  const scope = isTest ? sql`and is_test and test_run is not distinct from ${testRun}` : sql``;
   let ticketId: number | null = null;
   const refs = `${mail.inReplyTo ?? ""} ${mail.references ?? ""}`;
   const refMatch = refs.match(/ticket-(\d+)-[0-9a-f]+@tickets\.moovin\.de/);
@@ -75,18 +87,19 @@ export async function processInbound(mail: InboundMail, actor = "webhook", warni
   const subjMatch = mail.subject.match(/\[#T-(\d+)\]/);
   for (const cand of [refMatch?.[1], byProvider, subjMatch?.[1]]) {
     if (!cand) continue;
-    const t = await sql`select id, merged_into from ticket.tickets where id = ${Number(cand)} and sender_email = ${mail.fromEmail}`;
+    const t = await sql`select id, merged_into from ticket.tickets where id = ${Number(cand)} and sender_email = ${mail.fromEmail} ${scope}`;
     if (t.length) { ticketId = Number(t[0].merged_into ?? t[0].id); break; }
   }
   if (!ticketId) {
     const t = await sql`select id from ticket.tickets where sender_email = ${mail.fromEmail} and status <> 'geschlossen' and merged_into is null
-                        and created_at > now() - interval '14 days' order by created_at desc limit 1`;
+                        and created_at > now() - interval '14 days' ${scope} order by created_at desc limit 1`;
     if (t.length) ticketId = Number(t[0].id);
   }
 
   if (!ticketId) {
-    const [t] = await sql`insert into ticket.tickets (sender_email, sender_name, subject, sender_verified, due_at, last_inbound_at)
-      values (${mail.fromEmail}, ${mail.fromName || null}, ${mail.subject || null}, ${verification.verified}, ${dueDate(now)}, ${now}) returning id`;
+    // is_test wird hier gesetzt – also bevor analyzeTicket läuft (Auto-Versand, moovin-Aufrufe, Versand prüfen das Kennzeichen)
+    const [t] = await sql`insert into ticket.tickets (sender_email, sender_name, subject, sender_verified, due_at, last_inbound_at, is_test, test_run)
+      values (${mail.fromEmail}, ${mail.fromName || null}, ${mail.subject || null}, ${verification.verified}, ${dueDate(now)}, ${now}, ${isTest}, ${testRun}) returning id`;
     ticketId = Number(t.id);
   } else {
     const [prev] = await sql`select status from ticket.tickets where id = ${ticketId}`;
@@ -111,7 +124,7 @@ export async function processInbound(mail: InboundMail, actor = "webhook", warni
     await sql`insert into ticket.attachments (message_id, filename, content_type, size_bytes, content)
               values (${msg.id}, ${a.filename}, ${a.contentType}, ${a.size}, ${Buffer.from(a.contentBase64, "base64")})`;
   }
-  await audit(actor, "mail_in", { from: mail.fromEmail, attachments: mail.attachments.length, verified: verification.verified, detail: verification.detail }, ticketId);
+  await audit(actor, "mail_in", { from: mail.fromEmail, attachments: mail.attachments.length, verified: verification.verified, detail: verification.detail, ...(isTest ? { test: true, run: testRun } : {}) }, ticketId);
 
   await analyzeTicket(ticketId, "system", warnings);
   return { ticketId, duplicate: false };
@@ -205,14 +218,17 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
   const apptResolution = resolveAppointment(ctx, lastIn.subject ?? "", lastIn.body_text ?? "");
   const seen = new Set<string>();
   const valid: ProposedAction[] = [];
+  // Testtickets: nie Schreibaufrufe an moovin – Aktionen werden wie bei „moovin-Anbindung aus“ zu Aufgaben
+  const isTest = !!ticket.is_test;
+  const moovinWrite = moovinOn && !isTest;
   for (const a of r.actions ?? []) {
     if (!WRITE_ACTIONS.includes(a.type)) continue;
     if (INTERNAL_ACTIONS.includes(a.type)) {
       if (!seen.has(a.type)) { seen.add(a.type); valid.push({ ...a, application_id: "", appointment_id: "", interest: "" }); }
       continue;
     }
-    if (!moovinOn) {
-      // Livetest ohne moovin: keine IDs, kein moovin-Aufruf – der AM bekommt nach Freigabe eine Aufgabe
+    if (!moovinWrite) {
+      // Livetest ohne moovin (bzw. Testticket): keine IDs, kein moovin-Aufruf – der AM bekommt nach Freigabe eine Aufgabe
       if (!MANUAL_ACTIONS.includes(a.type)) continue;
       if (a.type === "dokumente_ablegen" && !atts.length) continue;
       if (a.type === "interesse_setzen" && !["interessiert", "zurueckgezogen"].includes(a.interest)) continue;
@@ -266,7 +282,7 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
 
   for (const a of valid) {
     const blocked = !ticket.sender_verified && !NO_MOOVIN_WRITE.includes(a.type) && !a.manual;
-    const label = actionLabel(a, ctx);
+    const label = actionLabel(a, ctx, isTest);
     await sql`insert into ticket.actions (ticket_id, draft_id, type, payload, label, status, blocked_reason, idempotency_key)
       values (${ticketId}, ${draft.id}, ${a.type}, ${sql.json(a as never)}, ${label}, ${blocked ? "blockiert" : "vorgeschlagen"},
               ${blocked ? "Absender nicht verifiziert (DKIM/DMARC) – Aktion bitte manuell in moovin prüfen" : null},
@@ -307,7 +323,8 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
     !!setting && setting.mode === "auto" && !setting.locked &&
     r.confidence >= Number(setting.threshold) && !r.needs_human && !!r.reply_text.trim() && !/\[AM:/.test(r.reply_text) &&
     (!!ctx || (!moovinOn && GENERAL_INTENTS.includes(r.intent))) && valid.every((a) => !a.manual) &&
-    (valid.length === 0 || ticket.sender_verified) && !aiError && !moovinError && !ev.autoBlocked;
+    (valid.length === 0 || ticket.sender_verified) && !aiError && !moovinError && !ev.autoBlocked &&
+    !isTest; // Testtickets: Auto-Versand grundsätzlich aus (auch wenn das Anliegen auf „auto“ steht)
 
   await sql`update ticket.tickets set
       intent = ${r.intent}, language = ${r.language}, confidence = ${r.confidence}, summary = ${r.summary},
@@ -341,9 +358,9 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
   }
 }
 
-function actionLabel(a: ProposedAction, ctx: ApplicantContext | null): string {
+function actionLabel(a: ProposedAction, ctx: ApplicantContext | null, isTest = false): string {
   if (a.manual) {
-    const pre = "Aufgabe für den AM (moovin-Anbindung aus): ";
+    const pre = isTest ? "Aufgabe für den AM (Testticket, kein moovin-Aufruf): " : "Aufgabe für den AM (moovin-Anbindung aus): ";
     switch (a.type) {
       case "dokumente_ablegen": return `${pre}Anhänge in moovin am Bewerber ablegen`;
       case "termin_bestaetigen": return `${pre}Teilnahme am Besichtigungstermin in moovin bestätigen`;
@@ -433,7 +450,7 @@ export async function sendDraft(opts: { ticketId: number; draftId: number; actor
 }
 
 export async function executeAction(actionId: number, actor: string): Promise<{ id: number; ok: boolean; error?: string }> {
-  const [a] = await sql`select a.*, t.sender_email, t.sender_verified, t.applicant_id, t.assignee_email from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
+  const [a] = await sql`select a.*, t.sender_email, t.sender_verified, t.applicant_id, t.assignee_email, t.is_test from ticket.actions a join ticket.tickets t on t.id = a.ticket_id where a.id = ${actionId}`;
   if (!a) return { id: actionId, ok: false, error: "nicht gefunden" };
   if (a.status !== "vorgeschlagen") return { id: actionId, ok: false, error: `Status ${a.status}` };
   const p = a.payload as ProposedAction;
@@ -448,6 +465,9 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
     let result: unknown;
     // moovin-Anbindung aus: nichts an moovin senden – die Aufgabe für den AM entsteht unten (taskForAction)
     if (p.manual && a.type !== "termin_verschieben_wunsch") result = { manuell: true };
+    // Testticket: nie ein Schreibaufruf an moovin (zweite Sicherung, falls eine Aktion ohne „manuell“ entstanden ist).
+    // Mails (Verschiebewunsch, Datenschutz) laufen weiter durch deliver() und werden dort gesperrt.
+    else if (a.is_test && !NO_MOOVIN_WRITE.includes(a.type)) { p.manual = true; result = { manuell: true, test: true }; }
     else switch (a.type as ActionType) {
       case "dokumente_ablegen": {
         const [d] = await sql`select in_message_id from ticket.drafts where id = ${a.draft_id}`;
