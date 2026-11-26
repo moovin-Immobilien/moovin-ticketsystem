@@ -13,6 +13,7 @@ import { STAGE_LABEL, markClass } from "@/components/signals";
 import { knownObjects } from "@/lib/objects";
 import { moovinEnabled } from "@/lib/settings";
 import { crmObject } from "@/lib/crm/objects";
+import { classifyAttachment } from "@/lib/attachments";
 
 export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
   const agent = await requireAgent();
@@ -23,7 +24,8 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
   if (!t || !(await canSeeTicket(agent, t as never))) notFound();
 
   const messages = await sql`select * from ticket.messages where ticket_id = ${ticketId} order by created_at asc`;
-  const atts = await sql`select id, message_id, filename, content_type, size_bytes, forwarded_at from ticket.attachments where message_id = any(${messages.map((m) => m.id)})`;
+  const atts = (await sql<{ id: string; message_id: string; filename: string; content_type: string; size_bytes: number; forwarded_at: Date | null; head: Buffer | null }[]>`select id, message_id, filename, content_type, size_bytes, forwarded_at, substring(content from 1 for 16) as head
+    from ticket.attachments where message_id = any(${messages.map((m) => m.id)})`).map((a) => ({ ...a, cls: classifyAttachment(a.filename, new Uint8Array(a.head ?? [])) }));
   const [draft] = await sql`select * from ticket.drafts where ticket_id = ${ticketId} order by created_at desc limit 1`;
   const actions = draft ? await sql`select * from ticket.actions where draft_id = ${draft.id} order by id` : [];
   const agents = await sql`select email, name from ticket.agents where active order by name`;
@@ -145,7 +147,17 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
                 {atts.filter((a) => a.message_id === m.id).length > 0 && (
                   <div className="mt-3 flex flex-wrap gap-2">
                     {atts.filter((a) => a.message_id === m.id).map((a) => (
-                      <span key={a.id} className="badge bg-canvas border border-line text-muted">📎 {a.filename} · {Math.round(a.size_bytes / 1024)} KB{a.forwarded_at ? " · an moovin übergeben" : ""}</span>
+                      <span key={a.id} data-testid="attachment" className="badge bg-canvas border border-line text-muted gap-2">
+                        📎 {a.filename} · {Math.round(a.size_bytes / 1024)} KB{a.forwarded_at ? " · an moovin übergeben" : ""}
+                        {a.cls.kind === "blocked" ? (
+                          <span className="text-pink" title="Aus Sicherheitsgründen gesperrt – beim Bewerber als PDF anfordern">gesperrt: {a.cls.reason}</span>
+                        ) : (
+                          <>
+                            {a.cls.preview && <a className="text-navy underline" href={`/api/attachments/${a.id}`} target="_blank" rel="noopener noreferrer">Ansehen</a>}
+                            <a className="text-navy underline" href={`/api/attachments/${a.id}?download=1`}>Herunterladen</a>
+                          </>
+                        )}
+                      </span>
                     ))}
                   </div>
                 )}
