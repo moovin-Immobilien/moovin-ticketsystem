@@ -20,6 +20,12 @@ export type MailSetupStatus = {
   error?: string;
 };
 
+/** Brevo antwortet bei leerer Liste mit 400 „Webhook record does not exist“ statt mit []. */
+async function inboundHooks(): Promise<Hook[]> {
+  try { return (await brevo<{ webhooks?: Hook[] }>("/webhooks?type=inbound")).webhooks ?? []; }
+  catch (e) { if (/does not exist/i.test((e as Error).message)) return []; throw e; }
+}
+
 function webhookUrl() {
   return `${env.appUrl()}/api/inbound/email?token=${encodeURIComponent(env.inboundToken())}`;
 }
@@ -50,8 +56,7 @@ export async function mailSetupStatus(): Promise<MailSetupStatus> {
     const d = await brevo<{ domains?: { domain_name: string; authenticated?: boolean; verified?: boolean }[] }>("/senders/domains").catch(() => ({ domains: [] }));
     const dom = (d.domains ?? []).find((x) => x.domain_name?.toLowerCase() === sender);
     status.senderDomain = dom ? { name: dom.domain_name, authenticated: !!dom.authenticated, verified: !!dom.verified } : null;
-    const hooks = await brevo<{ webhooks?: Hook[] }>("/webhooks?type=inbound");
-    const h = (hooks.webhooks ?? []).find((x) => (x.domain ?? "").toLowerCase() === INBOUND_DOMAIN);
+    const h = (await inboundHooks()).find((x) => (x.domain ?? "").toLowerCase() === INBOUND_DOMAIN);
     status.webhook = h ? { id: h.id, domain: h.domain ?? "", urlOk: h.url === webhookUrl() } : null;
   } catch (e) {
     status.error = (e as Error).message.slice(0, 200);
@@ -62,8 +67,7 @@ export async function mailSetupStatus(): Promise<MailSetupStatus> {
 /** Inbound-Webhook für die Empfangs-Subdomain anlegen bzw. auf die aktuelle URL setzen. Token erscheint nie im Browser oder Audit-Log. */
 export async function setupBrevoInbound(actor: string): Promise<string> {
   if (!env.brevoApiKey()) throw new Error("BREVO_API_KEY fehlt in Vercel – erst eintragen und neu deployen.");
-  const hooks = await brevo<{ webhooks?: Hook[] }>("/webhooks?type=inbound");
-  const existing = (hooks.webhooks ?? []).find((x) => (x.domain ?? "").toLowerCase() === INBOUND_DOMAIN);
+  const existing = (await inboundHooks()).find((x) => (x.domain ?? "").toLowerCase() === INBOUND_DOMAIN);
   const body = { url: webhookUrl(), description: "moovin Ticketsystem – Eingang mieter@", events: ["inboundEmailProcessed"] };
   if (existing) {
     await brevo(`/webhooks/${existing.id}`, { method: "PUT", body: JSON.stringify(body) });
