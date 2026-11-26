@@ -13,11 +13,39 @@ function parseFrom(from: string): { name: string; email: string } {
 }
 
 /**
+ * Reservierte Test-Domains (RFC 2606/6761): example.com/.org/.net (inkl. Subdomains) und die TLDs .example, .test,
+ * .invalid, .local. An diese Adressen geht nie eine Mail raus – egal welches Ticket.
+ */
+const TEST_DOMAIN = /(^|\.)example\.(com|org|net)$|(^|\.)(example|test|invalid|local)$/i;
+
+export function isReservedTestAddress(email: string): boolean {
+  const domain = email.trim().toLowerCase().replace(/>$/, "").split("@").pop() ?? "";
+  return !domain || TEST_DOMAIN.test(domain.replace(/\.$/, ""));
+}
+
+/**
+ * Testsperre: Testticket oder Empfänger auf einer reservierten Test-Domain → nie einen Versanddienst aufrufen.
+ * Prüft das Kennzeichen direkt in der Datenbank (nicht im Aufrufer), damit kein Weg daran vorbeiführt.
+ */
+async function testLock(m: OutMail): Promise<string | null> {
+  if (isReservedTestAddress(m.to)) return "Test-Domain";
+  const [t] = await sql`select is_test from ticket.tickets where id = ${m.ticketId}`;
+  if (!t) return "Ticket unbekannt";
+  return t.is_test ? "Testticket" : null;
+}
+
+/**
  * Versand über den Dienst aus MAIL_PROVIDER (brevo | postmark). Ohne Zugangsdaten wird nur simuliert.
  * Brevo erlaubt keine Standard-Header (Message-ID, In-Reply-To) → Brevo vergibt die Message-ID selbst; wir speichern sie
  * (providerMessageId), damit Antworten über In-Reply-To wieder zum Ticket finden. Zusätzlich steht [#T-…] im Betreff.
  */
 async function deliver(m: OutMail): Promise<{ delivery: Delivery; providerMessageId: string | null }> {
+  // Harte Testsperre vor jedem Versanddienst (Antworten, interne Mails, Auto-Versand – alles läuft hier durch)
+  const locked = await testLock(m);
+  if (locked) {
+    await audit("system", "mail_out", { to: m.to, subject: m.subject, mode: "test_gesperrt", reason: locked }, m.ticketId);
+    return { delivery: "simuliert", providerMessageId: null };
+  }
   const provider = env.mailProvider();
   if (provider === "brevo" && env.brevoApiKey()) {
     const from = parseFrom(env.fromAddress());

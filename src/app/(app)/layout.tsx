@@ -1,16 +1,19 @@
 import Link from "next/link";
-import { requireAgent } from "@/lib/auth";
+import { requireAgent, showTestTickets, testSql } from "@/lib/auth";
 import { sql } from "@/lib/db";
 import { demoMode } from "@/lib/env";
 import { moovinEnabled } from "@/lib/settings";
 import { logoutAction } from "../login/actions";
+import { toggleTestTicketsAction } from "./simulieren/actions";
 
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   const agent = await requireAgent();
   const moovinOn = await moovinEnabled();
+  const showTests = await showTestTickets(agent);
   const [c] = await sql`select
-      (select count(*) from ticket.tickets where assignee_email is null and status not in ('beantwortet','geschlossen') and merged_into is null) as eingang,
-      (select count(*) from ticket.agents where not active and approved_at is null) as pending`;
+      (select count(*) from ticket.tickets t where t.assignee_email is null and t.status not in ('beantwortet','geschlossen') and t.merged_into is null and ${testSql(showTests)}) as eingang,
+      (select count(*) from ticket.agents where not active and approved_at is null) as pending,
+      exists (select 1 from ticket.tickets where is_test) as has_tests`;
   const nav: { href: string; label: string; count?: number }[] = [
     { href: "/mein", label: "Mein Bereich" },
     { href: "/eingang", label: "Allgemeiner Eingang", count: Number(c.eingang) },
@@ -38,6 +41,14 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">
+            {c.has_tests && (
+              <form action={toggleTestTicketsAction.bind(null, !showTests)}>
+                <button className={`badge whitespace-nowrap ${showTests ? "bg-violet-100 text-violet-800" : "bg-canvas text-muted"}`} data-testid="toggle-tests"
+                  title={showTests ? "Testtickets werden in den Listen angezeigt" : "Testtickets sind ausgeblendet"}>
+                  TEST {showTests ? "ein" : "aus"}
+                </button>
+              </form>
+            )}
             <form action="/suche"><input name="q" placeholder="Suche: Name, Mail, Objekt, T-Nr." className="input h-8 w-52 text-xs" /></form>
             <span className="text-muted whitespace-nowrap">{agent.name}</span>
             <form action={logoutAction}><button className="text-muted hover:text-pink text-xs">Abmelden</button></form>
