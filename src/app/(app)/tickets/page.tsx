@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { sql } from "@/lib/db";
-import { requireAgent, visibleSql } from "@/lib/auth";
+import { requireAgent, visibleSql, showTestTickets, testSql } from "@/lib/auth";
 import { moovinEnabled } from "@/lib/settings";
-import { StatusBadge, IntentBadge, ConfidenceBar, fmtDateTime } from "@/components/ui";
+import { StatusBadge, IntentBadge, ConfidenceBar, fmtDateTime, TestBadge } from "@/components/ui";
 
 const VIEWS = [
   { key: "offen", label: "Offen" },
@@ -23,6 +23,7 @@ export default async function TicketsPage(props: PageProps<"/tickets">) {
 
   // Sichtbarkeit: Admin alles; AM eigene + Pool + überfällige
   const visible = visibleSql(agent);
+  const tests = testSql(await showTestTickets(agent));
   const filter =
     view === "meine" ? sql`t.assignee_email = ${agent.email} and ${open}` :
     view === "pool" ? sql`t.assignee_email is null and ${open}` :
@@ -36,7 +37,7 @@ export default async function TicketsPage(props: PageProps<"/tickets">) {
       (select count(*) from ticket.messages m where m.ticket_id = t.id) as msg_count,
       (select count(*) from ticket.actions x where x.ticket_id = t.id and x.status in ('vorgeschlagen','blockiert')) as open_actions
     from ticket.tickets t left join ticket.agents a on a.email = t.assignee_email
-    where ${visible} and ${filter} ${byEmail}
+    where ${visible} and ${tests} and ${filter} ${byEmail}
     order by case when t.status in ('beantwortet','geschlossen') then 1 else 0 end, t.due_at asc nulls last, t.created_at desc
     limit 200`;
 
@@ -46,7 +47,7 @@ export default async function TicketsPage(props: PageProps<"/tickets">) {
            count(*) filter (where t.auto_handled and t.created_at > now() - interval '7 days') as auto7,
            count(*) filter (where t.first_response_at is not null and t.created_at > now() - interval '7 days') as answered7,
            percentile_cont(0.5) within group (order by extract(epoch from (t.first_response_at - t.created_at))/60) filter (where t.first_response_at is not null) as median_min
-    from ticket.tickets t where ${visible}`;
+    from ticket.tickets t where ${visible} and not t.is_test`;
 
   return (
     <div className="space-y-5">
@@ -91,7 +92,7 @@ export default async function TicketsPage(props: PageProps<"/tickets">) {
               const overdue = t.due_at && new Date(t.due_at) < new Date() && !["beantwortet", "geschlossen"].includes(t.status);
               return (
                 <tr key={t.id} className="border-t border-line hover:bg-canvas/60">
-                  <td className="px-4 py-3 text-muted tabular-nums whitespace-nowrap"><Link href={`/tickets/${t.id}`}>T-{t.id}</Link></td>
+                  <td className="px-4 py-3 text-muted tabular-nums whitespace-nowrap"><Link href={`/tickets/${t.id}`}>T-{t.id}</Link>{t.is_test && <div className="mt-1"><TestBadge isTest /></div>}</td>
                   <td className="px-4 py-3">
                     <Link href={`/tickets/${t.id}`} className="block">
                       <div className="font-medium text-ink">{t.sender_name || t.sender_email}</div>

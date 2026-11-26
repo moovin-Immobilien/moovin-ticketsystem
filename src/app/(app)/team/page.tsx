@@ -9,7 +9,7 @@ export default async function Team() {
   await requireAdmin();
   const pending = await sql`select * from ticket.agents where not active and approved_at is null order by requested_at desc nulls last`;
   const agents = await sql`select a.*, a.absent_from::text as af, a.absent_until::text as au, d.name as deputy_name,
-      (select count(*) from ticket.tickets t where t.assignee_email = a.email and t.status not in ('beantwortet','geschlossen')) as open_tickets
+      (select count(*) from ticket.tickets t where t.assignee_email = a.email and t.status not in ('beantwortet','geschlossen') and not t.is_test) as open_tickets
     from ticket.agents a left join ticket.agents d on d.email = a.deputy_email where a.approved_at is not null or a.active order by a.active desc, a.name`;
   const actives = agents.filter((a) => a.active);
   return (
