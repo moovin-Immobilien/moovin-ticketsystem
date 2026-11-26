@@ -36,6 +36,7 @@ export function DraftPanel(props: { ticketId: number; draftId: number | null; dr
           {hasPlaceholder && <span className="text-xs text-pink">Platzhalter [AM: …] ersetzen, bevor gesendet wird</span>}
         </div>
         <textarea className="input font-[inherit] leading-relaxed min-h-72" value={text} onChange={(e) => setText(e.target.value)} />
+        <p className="mt-1 text-xs text-muted">Die moovin-Signatur (Hilfecenter-Link, Firmenangaben, Datenschutz) wird beim Versand automatisch angehängt.</p>
       </div>
 
       {props.actions.length > 0 && (
