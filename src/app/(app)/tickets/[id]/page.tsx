@@ -4,10 +4,10 @@ import { sql } from "@/lib/db";
 import { requireAgent, canSeeTicket } from "@/lib/auth";
 import { MoovinClient } from "@/lib/moovin/client";
 import type { ApplicantContext } from "@/lib/moovin/types";
-import { StatusBadge, IntentBadge, ConfidenceBar, fmtLong, VerifiedBadge, TestBadge } from "@/components/ui";
+import { StatusBadge, IntentBadge, ConfidenceBar, fmtLong, VerifiedBadge, TestBadge, TaskText } from "@/components/ui";
 import { DraftPanel } from "./DraftPanel";
 import { Presence } from "./Presence";
-import { takeOverAction, assignAction, addNoteAction, handoverAction, mergeAction, reviewedAction, taskDoneAction, signalFeedbackAction } from "./actions";
+import { takeOverAction, assignAction, addNoteAction, handoverAction, mergeAction, reviewedAction, taskDoneAction, signalFeedbackAction, reopenAction } from "./actions";
 import { SIGNAL_INFO, type Signal } from "@/lib/signals";
 import { STAGE_LABEL, markClass } from "@/components/signals";
 import { knownObjects } from "@/lib/objects";
@@ -120,7 +120,10 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
                 recipient={t.reply_to_email ?? t.sender_email} editable={draftEditable && !t.merged_into} awaitsReply={!!analysis.awaits_reply} lastOutId={lastOutId} />
             ) : (
               <div className="space-y-3">
-                <p className="text-sm text-muted">{t.status === "wartet" ? "Ticket wartet auf die Antwort des Bewerbers. Seine Antwort holt es automatisch zurück." : `Ticket ist ${t.status}. Neue Mails des Absenders öffnen es automatisch wieder.`}</p>
+                <p className="text-sm text-muted flex items-center gap-3">
+                  <span>{t.status === "wartet" ? "Ticket wartet auf die Antwort des Bewerbers. Seine Antwort holt es automatisch zurück." : `Ticket ist ${t.status}. Neue Mails des Absenders öffnen es automatisch wieder.`}</span>
+                  {!t.merged_into && <form action={reopenAction.bind(null, ticketId)}><button className="badge bg-white border border-line text-navy hover:bg-canvas" data-testid="reopen">Wiedereröffnen</button></form>}
+                </p>
                 {actions.length > 0 && (
                   <ul className="text-sm space-y-1">
                     {actions.map((a) => (
@@ -229,7 +232,7 @@ export default async function TicketPage(props: PageProps<"/tickets/[id]">) {
                   <form action={taskDoneAction.bind(null, Number(k.id), k.status !== "erledigt")}>
                     <button title={k.status === "erledigt" ? "Wieder öffnen" : "Abhaken"} className={`mt-0.5 h-4 w-4 rounded border ${k.status === "erledigt" ? "bg-emerald-500 border-emerald-500" : "border-line bg-white"}`} />
                   </form>
-                  <div className={k.status === "erledigt" ? "line-through text-muted" : ""}>{k.text}<div className="text-xs text-muted">{k.assignee_name ?? "Allgemeiner Eingang"}</div></div>
+                  <div className={k.status === "erledigt" ? "line-through text-muted" : ""}><TaskText text={k.text} /><div className="text-xs text-muted">{k.assignee_name ?? "Allgemeiner Eingang"}</div></div>
                 </div>
               ))}
             </section>

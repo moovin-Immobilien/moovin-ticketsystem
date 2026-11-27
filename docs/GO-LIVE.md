@@ -40,10 +40,12 @@ datenschutz@), es gibt keinen Auto-Versand und keine Schreibaufrufe an moovin. Z
 (example.com/.org/.net, *.test, *.invalid, *.local, *.example) wird nie versendet.
 
 1. **Testmail → Abschnitt „Testbatterie“** (nur Admin): Fälle auswählen (Standard: alle) → *Testbatterie laden*. Je Fall ein Aufruf
-   (ca. 10–40 s), 3 parallel, Fortschritt und Fehler je Fall werden angezeigt; Folgemails laufen nach ihrem Vorgänger.
-   Kosten je Lauf ≈ 44 Claude-Aufrufe, grob 2–4 $.
+   (ca. 5–40 s; der Browser ruft die Fälle nacheinander ab), Fortschritt und Fehler je Fall werden angezeigt; Folgemails laufen nach ihrem Vorgänger.
+   Kosten je Lauf ≈ 44 Claude-Aufrufe, grob 2–4 $. **Die Seite während des Ladens nicht verlassen** – die Schleife läuft im Browser.
+   Wurde ein Lauf trotzdem abgebrochen, zeigt die Seite ihn unter „Unvollständige Läufe“: *Fehlende Fälle nachladen* spielt nur die fehlenden
+   Fälle ein, mit denselben Objekten (der Plan je Lauf liegt in `test_runs`); Folgemails hängen an ihrem bereits vorhandenen Vorgänger.
 2. **Testbericht** (`/simulieren/bericht?run=…`, Link nach dem Lauf): je Fall Soll gegen Ist – Anliegen, Stufe, Signale, Fall B/C/D,
-   Zuordnung (Quelle, AM), Sprache, Auto, [AM: …]-Platzhalter, Aktion. Abweichungen rot, oben die Trefferquote für Anliegen und Stufe.
+   Zuordnung (Quelle, AM), Sprache, Auto, Aktion. Abweichungen rot, oben die Trefferquote für Anliegen und Stufe.
    „Prüfen“-Hinweise (z. B. „keine fremden Daten, kein Score“) im Entwurf von Hand ansehen.
 3. Testtickets tragen das Badge **TEST**, zählen in keiner Kennzahl und sind für AMs ausgeblendet (Schalter „TEST ein/aus“ oben rechts).
    Sie dürfen bei AMs landen (die Zuordnung wird mitgetestet). Im Ticket kann man „Freigeben & senden“ gefahrlos ausprobieren: Status „simuliert“.
@@ -51,6 +53,9 @@ datenschutz@), es gibt keinen Auto-Versand und keine Schreibaufrufe an moovin. Z
 5. **Aufräumen**: *Testtickets löschen* (je Lauf oder alle, mit Bestätigung) – entfernt Tickets samt Nachrichten, Entwürfen, Aktionen,
    Aufgaben, Notizen, Anhängen und Signal-Rückmeldungen. Das Audit-Log bleibt (insert-only).
 6. Einzelne Testmails über das Formular darüber sind standardmäßig ebenfalls Testtickets (Haken „Als Testticket“).
+7. Erkenntnisse aus dem ersten Prüfdurchgang (27.11.2026) sind umgesetzt: keine `[AM: …]`-Platzhalter mehr (neutrale, versandfertige
+   Entwürfe), keine Behauptungen über Erledigtes ohne moovin-Schreibzugriff, Vertragsweg/Kaution/Übergabe nur allgemein, eine Aufgabe je
+   Ticket (Checkliste), Reiter „Erledigt“ in Mein Bereich.
 
 ## Phase 2 · Schattenbetrieb (1 Woche)
 

@@ -326,6 +326,28 @@ async function testbatterie(admin: Page, lena: Page) {
     const [m] = await sql`select actor from ticket.audit_log where ticket_id = ${h.ticket_id} and kind = 'mail_in'`;
     assert(m.actor === `test:${ADMIN}`, m.actor);
     assert(brevo.sent.length === sentBefore, "Brevo aufgerufen");
+    assert((await sql`select 1 from ticket.test_runs where run = ${run}`).length, "Plan des Laufs nicht gespeichert");
+  });
+
+  await check("Testbatterie: abgebrochener Lauf → „Fehlende Fälle nachladen“ mit demselben Objekt, Folgemail hängt am vorhandenen Vorgänger", async () => {
+    const [h] = await sql`select ticket_id, object_id from ticket.test_results where test_run = ${run} and case_key = 'objekt_haustier'`;
+    const [n2] = await sql`select ticket_id from ticket.test_results where test_run = ${run} and case_key = 'nachgehakt_2'`;
+    // Abbruch simulieren: Ergebnis und Ticket eines Falls weg, Folgemail nur als Ergebnis weg (Ticket bleibt beim Vorgänger)
+    await sql`delete from ticket.tickets where id = ${h.ticket_id}`;
+    await sql`delete from ticket.test_results where test_run = ${run} and case_key in ('objekt_haustier', 'nachgehakt_2')`;
+    await sql`delete from ticket.messages where mail_message_id = ${`<testbatterie-${run}-nachgehakt_2@test.local>`}`;
+    await admin.goto(`${BASE}/simulieren`);
+    const box = await admin.locator('[data-testid="testbatterie-open-runs"]').innerText();
+    assert(box.includes(run) && box.includes("6/8"), box);
+    await admin.click(`[data-testid="testbatterie-resume-${run}"]`);
+    await admin.waitForSelector('[data-testid="testbatterie-report"]', { timeout: 180_000 });
+    const res = await sql`select * from ticket.test_results where test_run = ${run}`;
+    assert(res.length === 8 && res.every((r) => !r.error && r.ticket_id), JSON.stringify(res.map((r) => [r.case_key, r.error])));
+    const [h2] = await sql`select object_id from ticket.test_results where test_run = ${run} and case_key = 'objekt_haustier'`;
+    assert(h2.object_id === h.object_id, `Objekt gewechselt: ${h.object_id} → ${h2.object_id}`);
+    const [f2] = await sql`select ticket_id from ticket.test_results where test_run = ${run} and case_key = 'nachgehakt_2'`;
+    assert(Number(f2.ticket_id) === Number(n2.ticket_id), "Folgemail nicht am vorhandenen Vorgänger");
+    assert(await admin.locator('[data-testid="testbatterie-open-runs"]').count() === 0 || !(await admin.locator('[data-testid="testbatterie-open-runs"]').innerText()).includes(run), "Lauf gilt noch als unvollständig");
   });
 
   await check("Testbericht je Lauf: Soll/Ist, Trefferquote Anliegen und Stufe, Links zu den Tickets", async () => {
@@ -631,7 +653,9 @@ async function main() {
       tomId = Number(t.id);
       await sendFromUi(lena, tomId, { awaitReply: false });
       const [k] = await until(async () => { const r = await sql`select * from ticket.tasks where ticket_id = ${tomId}`; return r.length ? r : null; });
-      assert(k.type === "rueckzug" && k.assignee_email === LENA && k.status === "offen", JSON.stringify(k));
+      // Eine Aufgabe je Ticket: Rückzug in später Phase stuft sie hoch (Fall B), der Rückzug-Punkt steht in der Checkliste
+      assert(/Bewerbung in moovin zurückziehen/.test(k.text) && k.assignee_email === LENA && k.status === "offen" && k.priority <= 2, JSON.stringify(k));
+      assert(Number((await sql`select count(*) from ticket.tasks where ticket_id = ${tomId} and status = 'offen'`)[0].count) === 1, "mehr als eine offene Aufgabe");
     });
     await check("Verschiebewunsch → Mail an AM und Aufgabe bei Jonas", async () => {
       const t = await mailIn({ from: "julia.becker@example.net", name: "Julia Becker", subject: "Termin verschieben?", text: "Könnte ich den Besichtigungstermin auf Samstag verschieben?" });
@@ -862,17 +886,51 @@ async function main() {
       assert((await sql`select 1 from ticket.audit_log where detail->>'event' = 'moovin_anbindung' and detail->>'value' = 'aus'`).length, "Audit fehlt");
     });
     let offId = 0;
-    await check("Ohne moovin: Adresse in der Mail → AM laut CRM, kein moovin-Aufruf, Platzhalter statt „unbekannt“", async () => {
+    await check("Ohne moovin: Adresse in der Mail → AM laut CRM, kein moovin-Aufruf, neutraler Entwurf ohne Platzhalter und ohne „unbekannt“", async () => {
       const calls = Number((await sql`select count(*) from mock_moovin.request_log`)[0].count);
       const t = await mailIn({ from: "paula.neu@example.com", name: "Paula Neu", subject: "Bewerbung", text: "Guten Tag,\n\nwie ist der Stand meiner Bewerbung für die Wohnung Teststr. 12, 10115 Berlin?\n\nPaula Neu" });
       offId = Number(t.id);
       assert(t.assignee_email === LENA && t.routing_source === "crm_adresse" && t.object_id === "MV-TST001", JSON.stringify({ a: t.assignee_email, r: t.routing_source, o: t.object_id }));
       const [d] = await sql`select body_text from ticket.drafts where ticket_id = ${offId} order by id desc limit 1`;
-      assert(d.body_text.includes("[AM:") && !/keiner Bewerbung zuordnen/.test(d.body_text), d.body_text);
+      assert(!/\[AM:|\[.*?\]/.test(d.body_text) && !/keiner Bewerbung zuordnen/.test(d.body_text) && /Login|Profil/.test(d.body_text), d.body_text);
+      assert(t.needs_human, "Entwurf ohne Bewerberdaten muss geprüft werden");
       assert(Number((await sql`select count(*) from mock_moovin.request_log`)[0].count) === calls, "moovin wurde aufgerufen");
       await lena.goto(`${BASE}/tickets/${offId}`);
       assert(await lena.locator('[data-testid="moovin-off"]').count() === 1, "Hinweis im Ticket fehlt");
       assert((await lena.locator('[data-testid="object-card"]').innerText()).includes("Adresse in der Mail"), "Zuordnungsquelle fehlt");
+    });
+    await check("Ohne moovin: eine Aufgabe je Ticket – Unterlagen + Anmietwunsch + Notiz ergeben EINE Aufgabe als Checkliste, Folgemail ergänzt sie", async () => {
+      const t = await mailIn({ from: "paula.neu@example.com", name: "Paula Neu", subject: "Unterlagen Teststr. 12", text: "Guten Tag,\n\nanbei meine Unterlagen wie besprochen. Wir möchten die Wohnung Teststr. 12, 10115 Berlin gerne anmieten.\n\nPaula Neu",
+        attachments: [{ name: "Gehalt_Neu.pdf", token: "tok-neu-1" }, { name: "SCHUFA_Neu.pdf", token: "tok-neu-2" }] });
+      assert(Number(t.id) === offId, `neues Ticket statt Thread (${t.id} ≠ ${offId})`);
+      await sql`insert into ticket.actions (ticket_id, draft_id, type, payload, label, status, idempotency_key)
+        select ${offId}, d.id, 'notiz', ${sql.json({ type: "notiz", application_id: "", appointment_id: "", interest: "", text: "Partnerin zieht mit ein", manual: true })}, 'Notiz', 'vorgeschlagen', ${`e2e-notiz-${offId}`}
+        from ticket.drafts d where d.ticket_id = ${offId} and d.status = 'offen'`;
+      await sendFromUi(lena, offId, { awaitReply: false });
+      const open = await until(async () => { const r = await sql`select * from ticket.tasks where ticket_id = ${offId} and status = 'offen'`; return r.length ? r : null; });
+      assert(open.length === 1, `${open.length} offene Aufgaben statt 1: ${JSON.stringify(open.map((k) => k.text))}`);
+      const lines = String(open[0].text).split("\n");
+      assert(lines.length >= 2 && /^Unterlagen prüfen/.test(lines[0]) && open[0].priority === 1, JSON.stringify(open[0]));
+      assert(lines.some((l) => /Notiz in moovin eintragen/.test(l)), "Notiz-Punkt fehlt");
+      assert(!lines.some((l, i) => lines.findIndex((x) => x === l) !== i), "doppelte Zeilen");
+      // Folgemail mit weiterem Anhang → gleiche Aufgabe, nicht neu
+      await mailIn({ from: "paula.neu@example.com", name: "Paula Neu", subject: "Nachtrag", text: "Hier noch die Mietschuldenfreiheitsbescheinigung.", attachments: [{ name: "Mietschuldenfreiheit_Neu.pdf", token: "tok-neu-3" }] });
+      await sendFromUi(lena, offId, { awaitReply: false });
+      const after = await sql`select * from ticket.tasks where ticket_id = ${offId} and status = 'offen'`;
+      assert(after.length === 1 && Number(after[0].id) === Number(open[0].id), `nach Folgemail ${after.length} Aufgaben`);
+      await lena.goto(`${BASE}/mein?tab=aufgaben`);
+      const txt = await lena.locator(`[data-testid="task-${open[0].id}"]`).innerText();
+      assert(txt.includes("Unterlagen prüfen") && txt.includes("Notiz"), txt);
+    });
+    await check("Reiter „Erledigt“: von mir beantwortete Tickets, Wiedereröffnen", async () => {
+      await lena.goto(`${BASE}/mein?tab=erledigt`);
+      assert(Number(await lena.locator('[data-testid="count-erledigt"]').innerText()) >= 1, "Zähler Erledigt");
+      assert(await lena.locator(`[data-testid="row-${offId}"]`).count() === 1, "Ticket fehlt unter Erledigt");
+      await lena.click(`[data-testid="reopen-${offId}"]`);
+      await until(async () => (await sql`select status from ticket.tickets where id = ${offId}`)[0].status === "in_bearbeitung");
+      assert((await sql`select 1 from ticket.audit_log where ticket_id = ${offId} and detail->>'event' = 'wiedereroeffnet' and (detail->>'manuell')::boolean`).length, "Audit fehlt");
+      await lena.goto(`${BASE}/mein?tab=todo`);
+      assert(await lena.locator(`[data-testid="row-${offId}"]`).count() === 1, "Ticket nicht in Zu erledigen");
     });
     await check("Ohne moovin: Objekt eines nicht freigeschalteten AM → Allgemeiner Eingang mit Hinweis", async () => {
       const t = await mailIn({ from: "karl.test@example.com", name: "Karl Test", subject: "Exposé MV-TST002", text: "Ist ein Stellplatz dabei?" });
@@ -893,8 +951,10 @@ async function main() {
       const [a] = await sql`select status, payload, label from ticket.actions where ticket_id = ${offId} and status in ('vorgeschlagen','blockiert') order by id desc limit 1`;
       assert(a?.status === "vorgeschlagen" && a.payload.manual && /Aufgabe für den AM/.test(a.label), JSON.stringify(a));
       await sendFromUi(lena, offId, { awaitReply: false });
-      const [k] = await until(async () => { const r = await sql`select * from ticket.tasks where ticket_id = ${offId} and type = 'rueckzug'`; return r.length ? r : null; });
-      assert(k.assignee_email === LENA && k.status === "offen", JSON.stringify(k));
+      // Eine Aufgabe je Ticket: der Rückzug wird Punkt in der bestehenden offenen Aufgabe
+      const [k] = await until(async () => { const r = await sql`select * from ticket.tasks where ticket_id = ${offId} and status = 'offen' and text like '%Bewerbung in moovin zurückziehen%'`; return r.length ? r : null; });
+      assert(k.assignee_email === LENA, JSON.stringify(k));
+      assert(Number((await sql`select count(*) from ticket.tasks where ticket_id = ${offId} and status = 'offen'`)[0].count) === 1, "mehr als eine offene Aufgabe");
       const [x] = await sql`select status, result from ticket.actions where ticket_id = ${offId} and payload->>'manual' = 'true' order by id desc limit 1`;
       assert(x.status === "ausgefuehrt" && x.result.manuell, JSON.stringify(x));
       assert(Number((await sql`select count(*) from mock_moovin.notes`)[0].count) === notes, "Notiz an moovin geschrieben");

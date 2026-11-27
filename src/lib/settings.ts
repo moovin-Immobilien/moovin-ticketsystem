@@ -15,7 +15,7 @@ export async function setSetting(key: string, value: unknown, actor: string) {
 
 /**
  * moovin-Anbindung an/aus. „aus“ = Livetest ohne moovin-API: keine Abfragen und Schreibaufrufe an moovin,
- * die KI arbeitet ohne Bewerberdaten ([AM: …]-Platzhalter), Aktionen werden zu Aufgaben für den AM.
+ * die KI arbeitet ohne Bewerberdaten (neutrale Formulierung, keine Platzhalter), Aktionen werden zu Aufgaben für den AM.
  * Der Schalter (Admin, Seite „Objekte“) überschreibt die Umgebungsvariable MOOVIN_API_MODE.
  */
 export async function moovinEnabled(): Promise<boolean> {

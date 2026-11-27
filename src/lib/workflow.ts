@@ -37,22 +37,53 @@ export async function effectiveAssignee(email: string | null): Promise<{ assigne
 
 export type TaskType = "verschiebewunsch" | "rueckzug" | "interesse" | "notiz" | "nachfassen" | "manuell" | "unterlagen_pruefen" | "slot_nachbesetzen" | "kandidat_aktivieren";
 
-export async function createTask(t: { ticketId: number; type: TaskType; text: string; assignee: string | null; actionId?: number | null; createdBy?: string; due?: Date; priority?: number }) {
+/**
+ * Grundsatz: höchstens EINE offene Aufgabe je Ticket. Gibt es schon eine, wird der neue Punkt als Zeile angehängt
+ * (eine Checkliste je Ticket); Priorität und Fälligkeit werden auf das Dringendste gesetzt, der wichtigste Punkt steht oben.
+ * Bei erneuter Verarbeitung (Neu generieren, Folgemail im Thread, Senden mit Aktionen) wird die bestehende Aufgabe
+ * aktualisiert statt eine neue angelegt. Ein Punkt, der schon in der Aufgabe steht, wird nicht noch einmal angehängt.
+ */
+export async function createTask(t: { ticketId: number; type: TaskType; text: string; assignee: string | null; actionId?: number | null; createdBy?: string; due?: Date; priority?: number;
+  /** Zeile, die mit diesem Anfang beginnt, wird ersetzt statt ergänzt (z. B. „Unterlagen prüfen“ aus der Aktion → Hochstufung aus dem Signal) */
+  mergeHead?: string }) {
+  const line = t.text.replace(/\s+/g, " ").trim().slice(0, 600);
+  const priority = t.priority ?? 3;
+  const due = t.due ?? dueDate(new Date());
+  const by = t.createdBy ?? "system";
+  // Idempotenz je Aktion (z. B. Aktion zweimal ausgeführt): der Punkt dieser Aktion existiert schon
+  if (t.actionId && (await sql`select 1 from ticket.tasks where action_id = ${t.actionId}`).length) return null;
+  const [open] = await sql`select id, text, priority, type from ticket.tasks where ticket_id = ${t.ticketId} and status = 'offen' order by id limit 1 for update`;
+  if (open) {
+    const lines = String(open.text).split("\n").map((l) => l.trim().replace(/^•\s*/, "")).filter(Boolean);
+    const has = lines.some((l) => l === line);
+    if (!has) {
+      // Dringenderer Punkt kommt nach oben (bestimmt Titel und Typ), sonst ans Ende der Liste
+      const head = t.mergeHead?.trim();
+      const items = head ? lines.filter((l) => !l.startsWith(head)) : lines;
+      const newItems = priority < Number(open.priority) ? [line, ...items] : [...items, line];
+      const text = newItems.map((l, i) => (i === 0 ? l : `• ${l}`)).join("\n").slice(0, 2000);
+      const type = priority < Number(open.priority) ? t.type : open.type;
+      await sql`update ticket.tasks set text = ${text}, type = ${type}, priority = least(priority, ${priority}),
+                due_at = least(coalesce(due_at, ${due}), ${due}), assignee_email = coalesce(assignee_email, ${t.assignee}) where id = ${open.id}`;
+      await audit(by, "ticket", { event: "aufgabe_ergaenzt", type: t.type, task: Number(open.id) }, t.ticketId);
+    }
+    return Number(open.id);
+  }
   const [row] = await sql`insert into ticket.tasks (ticket_id, action_id, assignee_email, type, text, due_at, created_by, priority)
-    values (${t.ticketId}, ${t.actionId ?? null}, ${t.assignee}, ${t.type}, ${t.text.slice(0, 1000)}, ${t.due ?? dueDate(new Date())}, ${t.createdBy ?? "system"}, ${t.priority ?? 3})
+    values (${t.ticketId}, ${t.actionId ?? null}, ${t.assignee}, ${t.type}, ${line}, ${due}, ${by}, ${priority})
     on conflict (action_id) do nothing returning id`;
-  if (row) await audit(t.createdBy ?? "system", "ticket", { event: "aufgabe_angelegt", type: t.type, task: Number(row.id) }, t.ticketId);
+  if (row) await audit(by, "ticket", { event: "aufgabe_angelegt", type: t.type, task: Number(row.id) }, t.ticketId);
   return row ? Number(row.id) : null;
 }
 
-/** Nach erfolgreicher Aktion: Aufgabe für den AM, wenn er in moovin etwas tun muss. */
+/** Nach erfolgreicher Aktion: Punkt in der Aufgabe des Tickets, wenn der AM in moovin etwas tun muss. */
 export async function taskForAction(a: { id: number; ticket_id: number; type: string; payload: { interest?: string; text?: string; manual?: boolean }; label: string | null; assignee_email: string | null }) {
   let type: TaskType | null = null;
   let text = "";
   const manual = !!a.payload.manual; // moovin-Anbindung aus: der AM trägt es selbst in moovin ein
   if (a.type === "termin_verschieben_wunsch") { type = "verschiebewunsch"; text = `Neuen Termin anbieten: ${a.label ?? ""}`; }
   else if (a.type === "interesse_setzen" && a.payload.interest === "zurueckgezogen") { type = "rueckzug"; text = "Bewerbung in moovin zurückziehen (Bewerber hat per Mail zurückgezogen)"; }
-  else if (a.type === "interesse_setzen") { type = "interesse"; text = "Interesse des Bewerbers in moovin vermerken"; }
+  else if (a.type === "interesse_setzen") { type = "interesse"; text = manual ? "Anmietwunsch/Interesse in moovin vermerken und an den Vermieter weitergeben" : "Interesse des Bewerbers in moovin vermerken"; }
   else if (a.type === "notiz") { type = "notiz"; text = `${manual ? "Notiz in moovin eintragen" : "Notiz in moovin prüfen"}: ${String(a.payload.text ?? "").slice(0, 300)}`; }
   else if (manual && a.type === "dokumente_ablegen") { type = "manuell"; text = "Anhänge aus dem Ticket in moovin am Bewerber ablegen"; }
   else if (manual && a.type === "termin_bestaetigen") { type = "manuell"; text = "Teilnahme am Besichtigungstermin in moovin bestätigen"; }
@@ -63,22 +94,27 @@ export async function taskForAction(a: { id: number; ticket_id: number; type: st
 
 /**
  * Ticket-Intelligenz, Fall B: Die Antwort ist raus, die Arbeit bleibt (Unterlagen prüfen, Slot nachbesetzen, nächsten Kandidaten aktivieren).
- * Gibt es schon eine passende offene Aufgabe (z. B. „Rückzug“ aus der Aktion), wird sie hochgestuft; sonst entsteht bei
- * Auto-Antworten eine neue, markierte Aufgabe ganz oben in „Offene Aufgaben“.
+ * Der Punkt landet in der einen Aufgabe des Tickets und stuft sie hoch; gibt es noch keine, entsteht bei Auto-Antworten
+ * eine neue, markierte Aufgabe ganz oben in „Offene Aufgaben“.
  */
 export async function signalTasks(ticketId: number, createNew: boolean) {
   const [t] = await sql`select assignee_email, intent, signals from ticket.tickets where id = ${ticketId}`;
   if (!t) return;
   for (const f of followUpTasks((t.signals ?? []) as Signal[], t.intent)) {
     const due = addWorkingHours(new Date(), f.priority === 1 ? 2 : 4);
-    const [same] = await sql`select id from ticket.tasks where ticket_id = ${ticketId} and status = 'offen' and type = any(${[f.type, ...f.merges]}) order by id desc limit 1`;
-    if (same) {
-      await sql`update ticket.tasks set priority = least(priority, ${f.priority}), due_at = least(due_at, ${due}),
-                text = case when text like ${f.text.split(" – ")[0] + "%"} then text else ${f.text.split(" – ")[0]} || ' – ' || text end where id = ${same.id}`;
-    } else if (createNew) {
-      await createTask({ ticketId, type: f.type, text: f.text, assignee: t.assignee_email, priority: f.priority, due, createdBy: "ki" });
-    }
+    const [open] = await sql`select id from ticket.tasks where ticket_id = ${ticketId} and status = 'offen' limit 1`;
+    if (open || createNew) await createTask({ ticketId, type: f.type, text: f.text, assignee: t.assignee_email, priority: f.priority, due, createdBy: "ki", mergeHead: f.text.split(" – ")[0] });
   }
+}
+
+/** Wiedereröffnen durch den AM (Reiter „Erledigt“): beantwortete oder geschlossene Tickets zurück in die Bearbeitung. */
+export async function reopenTicket(ticketId: number, actor: string) {
+  const [t] = await sql`update ticket.tickets set status = 'in_bearbeitung', reopened_at = now(), closed_at = null, auto_handled = false,
+            waiting_since = null, waiting_reminded_at = null, due_at = coalesce(due_at, ${dueDate(new Date())}), updated_at = now()
+            where id = ${ticketId} and status in ('beantwortet','geschlossen','wartet') and merged_into is null returning id`;
+  if (!t) throw new Error("Ticket kann nicht wiedereröffnet werden");
+  await addNote(ticketId, actor.replace(/^am:/, ""), "Ticket manuell wiedereröffnet.", "system");
+  await audit(actor, "ticket", { event: "wiedereroeffnet", manuell: true }, ticketId);
 }
 
 export async function setTaskDone(taskId: number, actor: string, done: boolean) {

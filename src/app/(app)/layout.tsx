@@ -62,7 +62,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
       )}
       {!moovinOn && (
         <div className="bg-sky-50 border-b border-sky-200 text-sky-800 text-xs" data-testid="banner-moovin-off">
-          <div className="mx-auto max-w-[90rem] px-6 py-1.5">Livetest ohne moovin-Anbindung: Zuordnung zum AM über das CRM (Objekt in der Mail), keine Bewerberdaten – [AM: …]-Platzhalter ergänzen, Aktionen werden Aufgaben.</div>
+          <div className="mx-auto max-w-[90rem] px-6 py-1.5">Livetest ohne moovin-Anbindung: Zuordnung zum AM über das CRM (Objekt in der Mail), keine Bewerberdaten – Entwürfe bitte prüfen, Aktionen werden Aufgaben.</div>
         </div>
       )}
       <main className="mx-auto max-w-[90rem] w-full px-6 py-6 flex-1">{children}</main>

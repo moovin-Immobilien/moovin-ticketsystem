@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { requireAgent, requireAdmin, TEST_COOKIE } from "@/lib/auth";
 import { processInbound } from "@/lib/pipeline";
 import type { InboundMail } from "@/lib/inbound/parse";
-import { newRunId, planRun, loadCase, deleteTestTickets, RUN_RE, type PlanItem, type CaseResult } from "@/lib/testbatterie";
+import { newRunId, planRun, loadCase, deleteTestTickets, saveRun, runStatus, RUN_RE, type PlanItem, type CaseResult, type RunStatus } from "@/lib/testbatterie";
 
 // Kleines Test-PDF als Anhang (Inhalt egal – wird nie an Claude gegeben)
 const DUMMY_PDF = Buffer.from("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF").toString("base64");
@@ -42,9 +42,18 @@ export async function simulateAction(form: FormData) {
 
 /** Neuer Lauf: Laufkennung und Plan (Objekt je Fall). Eingespielt wird danach je Fall einzeln (Client-Schleife). */
 export async function prepareTestbatterieAction(keys: string[]): Promise<{ run: string; plan: PlanItem[] }> {
-  await requireAdmin();
+  const admin = await requireAdmin();
   const run = newRunId();
-  return { run, plan: await planRun(run, Array.isArray(keys) ? keys.map(String) : []) };
+  const plan = await planRun(run, Array.isArray(keys) ? keys.map(String) : []);
+  // Plan speichern: ein abgebrochener Lauf lässt sich mit denselben Objekten fortsetzen
+  await saveRun(run, plan, `test:${admin.email}`);
+  return { run, plan };
+}
+
+/** Stand eines Laufs (für „Fehlende Fälle nachladen“): fehlende Fälle mit ihren geplanten Objekten. */
+export async function resumeTestbatterieAction(run: string): Promise<RunStatus | null> {
+  await requireAdmin();
+  return runStatus(String(run));
 }
 
 /** Einen Fall einspielen (eigener Request, damit kein Vercel-Timeout greift). */

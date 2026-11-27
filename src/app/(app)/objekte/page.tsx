@@ -45,7 +45,7 @@ export default async function Objekte(props: PageProps<"/objekte">) {
         <p className="text-sm text-muted max-w-3xl">
           {moovinOn
             ? "Das System fragt Bewerber, Bewerbungen und Termine bei moovin ab und führt freigegebene Aktionen dort aus."
-            : "Ohne moovin-API: keine Abfragen und keine Schreibaufrufe an moovin. Der AM kommt aus dem CRM (Objekt in der Mail erkannt), die KI setzt [AM: …]-Platzhalter für persönliche Angaben, vorgeschlagene Aktionen werden nach der Freigabe zu Aufgaben."}
+            : "Ohne moovin-API: keine Abfragen und keine Schreibaufrufe an moovin. Der AM kommt aus dem CRM (Objekt in der Mail erkannt), die KI nennt keine persönlichen Angaben (Stand, Termin) und formuliert neutral, vorgeschlagene Aktionen werden nach der Freigabe zu Aufgaben."}
         </p>
         <form action={setMoovinModeAction.bind(null, !moovinOn)}>
           <button className={moovinOn ? "btn-ghost" : "btn-pink"}>{moovinOn ? "moovin-Anbindung ausschalten (Livetest)" : "moovin-Anbindung einschalten"}</button>

@@ -77,36 +77,36 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
   if (nothingToDo) {
     body = ""; reason = ""; conf = 0.8;
   } else if (i.moovinOff && !ctx && !general) {
-    // Livetest ohne moovin: keine Bewerberdaten → Platzhalter für den AM, Aktionen werden Aufgaben (keine moovin-Aufrufe)
+    // Livetest ohne moovin: keine Bewerberdaten → neutrale, versandfertige Formulierung (keine Platzhalter), der AM prüft; Aktionen werden Aufgaben (keine moovin-Aufrufe)
     conf = 0.75;
     switch (intent) {
       case "unterlagen_nachreichen":
-        if (i.attachments.length) { body = `vielen Dank, wir haben Ihre Unterlagen erhalten (${i.attachments.map((x) => x.filename).join(", ")}) und ordnen sie Ihrer Bewerbung zu.`; act({ type: "dokumente_ablegen", manual: true }); conf = 0.85; }
-        else { body = "vielen Dank für Ihre Nachricht. [AM: Unterlagen angekündigt, aber kein Anhang – bitte prüfen]"; needs = true; reason = "Unterlagen angekündigt, aber keine Anhänge gefunden"; conf = 0.5; }
+        if (i.attachments.length) { body = `vielen Dank für Ihre Unterlagen (${i.attachments.map((x) => x.filename).join(", ")}). Wir haben sie entgegengenommen und legen sie in Ihrem Bewerberprofil ab; eine inhaltliche Prüfung können wir an dieser Stelle noch nicht bestätigen.\n\nHinweis: Alle Unterlagen pflegen Sie am einfachsten in Ihrem moovin Login. Bitte stellen Sie sicher, dass dort alle Unterlagen hinterlegt sind.`; act({ type: "dokumente_ablegen", manual: true }); conf = 0.85; }
+        else { body = "vielen Dank für Ihre Nachricht. Bitte laden Sie Ihre Unterlagen in Ihrem moovin Profil hoch; dort sehen Sie auch, welche Dokumente noch benötigt werden."; needs = true; reason = "Unterlagen angekündigt, aber keine Anhänge gefunden"; conf = 0.5; }
         break;
       case "termin_bestaetigen":
-        body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihre Zusage für den Besichtigungstermin${obj} vermerkt.`; act({ type: "termin_bestaetigen", manual: true }); conf = 0.8; break;
+        body = `vielen Dank für Ihre Rückmeldung. Wir geben Ihre Zusage für den Besichtigungstermin${obj} an Ihren Ansprechpartner weiter.`; act({ type: "termin_bestaetigen", manual: true }); conf = 0.8; break;
       case "termin_absage":
-        body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihre Absage für den Besichtigungstermin${obj} vermerkt und geben den Platz frei.`; act({ type: "termin_absagen", manual: true }); conf = 0.8; break;
+        body = `vielen Dank für Ihre Rückmeldung. Wir geben Ihre Absage für den Besichtigungstermin${obj} an Ihren Ansprechpartner weiter.`; act({ type: "termin_absagen", manual: true }); conf = 0.8; break;
       case "termin_verschieben":
         body = "vielen Dank für Ihre Nachricht. Wir haben Ihren Wunsch, den Termin zu verschieben, an Ihren Ansprechpartner weitergegeben. Er meldet sich mit möglichen Alternativen.";
         act({ type: "termin_verschieben_wunsch", manual: true, text: i.newMessage.slice(0, 300) }); conf = 0.8; break;
       case "interesse_bestaetigen":
-        body = "vielen Dank, wir haben Ihr Interesse vermerkt und melden uns, sobald der Eigentümer entschieden hat."; act({ type: "interesse_setzen", interest: "interessiert", manual: true }); conf = 0.85; break;
+        body = "vielen Dank für Ihre Nachricht. Ihren Wunsch, die Wohnung anzumieten, geben wir an den zuständigen Ansprechpartner weiter. Bitte bestätigen Sie Ihr Mietinteresse zusätzlich über den Button in der E-Mail „Wollen Sie die Wohnung mieten?“ – falls Sie das bereits getan haben, ist nichts weiter nötig. Ihr Ansprechpartner meldet sich zu den nächsten Schritten."; act({ type: "interesse_setzen", interest: "interessiert", manual: true }); conf = 0.85; break;
       case "rueckzug":
-        body = "vielen Dank für Ihre Rückmeldung. Wir haben vermerkt, dass Sie Ihre Bewerbung zurückziehen. Wir wünschen Ihnen alles Gute bei der Wohnungssuche.";
+        body = "vielen Dank für Ihre Rückmeldung. Wir geben Ihren Rückzug an Ihren Ansprechpartner weiter. Wir wünschen Ihnen alles Gute bei der Wohnungssuche.";
         act({ type: "interesse_setzen", interest: "zurueckgezogen", manual: true }); conf = 0.88; break;
       case "besichtigung_frage":
-        body = `vielen Dank für Ihre Frage${obj}. [AM: Termin und Treffpunkt ergänzen]`; needs = true; reason = "moovin-Anbindung aus: Termin bitte in moovin nachsehen"; break;
+        body = `vielen Dank für Ihre Frage${obj}. Datum, Uhrzeit und Treffpunkt Ihrer Besichtigung finden Sie in Ihrer Einladungs-E-Mail und in Ihrem moovin Profil. Bitte kommen Sie pünktlich zum dort genannten Treffpunkt.`; needs = true; reason = "moovin-Anbindung aus: Termin bitte in moovin nachsehen"; break;
       case "bewerbungsstatus":
-        body = `vielen Dank für Ihre Nachricht${obj}. [AM: Stand der Bewerbung ergänzen]`; needs = true; reason = "moovin-Anbindung aus: Stand bitte in moovin nachsehen"; break;
+        body = `vielen Dank für Ihre Nachricht${obj}. Haben Sie Ihr Interesse an der Wohnung nach der Besichtigung über den Button in der E-Mail „Wollen Sie die Wohnung mieten?“ bereits bestätigt? Dies ist Voraussetzung für den weiteren Prozess. Bitte prüfen Sie Ihren moovin Login, hier erscheinen alle notwendigen nächsten Schritte und Sie können den Stand der Bewerbung einsehen.`; needs = true; reason = "moovin-Anbindung aus: Stand bitte in moovin nachsehen"; break;
       case "objekt_frage": {
         const hits = await i.tools.searchKnowledge(text);
-        body = hits.length ? `vielen Dank für Ihre Frage. ${hits[0].body}` : `vielen Dank für Ihre Frage${obj}. [AM: bitte beantworten]`;
+        body = hits.length ? `vielen Dank für Ihre Frage. ${hits[0].body}` : `vielen Dank für Ihre Frage${obj}. Ihr Ansprechpartner meldet sich dazu bei Ihnen.`;
         needs = !hits.length; reason = needs ? "Keine passende Info in der Wissensdatenbank" : ""; conf = hits.length ? 0.7 : 0.3; break;
       }
       default:
-        body = "vielen Dank für Ihre Nachricht. [AM: bitte beantworten]"; needs = true; reason = "Anliegen nicht eindeutig"; conf = 0.3;
+        body = "vielen Dank für Ihre Nachricht. Ihr Ansprechpartner meldet sich dazu bei Ihnen."; needs = true; reason = "Anliegen nicht eindeutig"; conf = 0.3;
     }
   } else if (!ctx && !general) {
     body = "vielen Dank für Ihre Nachricht. Leider können wir Ihre Mailadresse keiner Bewerbung zuordnen. Bitte schreiben Sie uns von der Adresse, mit der Sie sich beworben haben, oder nennen Sie uns Objekt und Namen, unter dem die Bewerbung erfolgt ist.";
@@ -114,35 +114,35 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
   } else switch (intent) {
     case "bewerbungsstatus":
       body = `vielen Dank für Ihre Nachricht zur Wohnung „${app?.object_title}“. ${app?.status_label} ${app?.next_step ?? ""}`;
-      if (app?.missing_documents.length) body += `\n\nFolgende Unterlagen fehlen noch:\n- ${app.missing_documents.join("\n- ")}\n\nSie können diese einfach als Antwort auf diese Mail senden.`;
+      if (app?.missing_documents.length) body += `\n\nFolgende Unterlagen fehlen noch:\n- ${app.missing_documents.join("\n- ")}\n\nBitte laden Sie diese in Ihrem moovin Profil hoch.`;
       conf = 0.9; break;
     case "unterlagen_nachreichen":
-      body = `vielen Dank, wir haben Ihre Unterlagen erhalten (${i.attachments.map((x) => x.filename).join(", ") || "ohne Anhang"}) und in Ihrem Bewerberprofil abgelegt. Wir prüfen sie in der Regel innerhalb von 1–2 Werktagen.`;
+      body = `vielen Dank, wir haben Ihre Unterlagen erhalten (${i.attachments.map((x) => x.filename).join(", ") || "ohne Anhang"}) und in Ihrem Bewerberprofil abgelegt. Eine inhaltliche Prüfung können wir an dieser Stelle noch nicht bestätigen.`;
       if (!i.attachments.length) { needs = true; reason = "Unterlagen angekündigt, aber keine Anhänge gefunden"; conf = 0.5; }
       if (ctx && i.attachments.length) act({ type: "dokumente_ablegen" });
       conf = Math.min(conf, 0.88); break;
     case "termin_absage":
       if (appt) { body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihren Besichtigungstermin am ${fmt(appt.starts_at)} storniert und den Platz freigegeben.`; act({ type: "termin_absagen", appointment_id: appt.id }); conf = 0.9; }
       else if (ambiguous) body = askWhich();
-      else { body = "vielen Dank für Ihre Nachricht. Wir konnten keinen offenen Termin finden. [AM: bitte prüfen]"; needs = true; reason = "Kein offener Termin gefunden"; conf = 0.4; }
+      else { body = "vielen Dank für Ihre Nachricht. Wir geben Ihre Absage an Ihren Ansprechpartner weiter."; needs = true; reason = "Kein offener Termin gefunden"; conf = 0.4; }
       break;
     case "termin_bestaetigen":
       if (appt) { body = `vielen Dank für Ihre Rückmeldung. Wir haben Ihre Teilnahme am Besichtigungstermin am ${fmt(appt.starts_at)} bestätigt. Treffpunkt: ${appt.meeting_point}. Bitte bringen Sie einen Lichtbildausweis mit.`; act({ type: "termin_bestaetigen", appointment_id: appt.id }); conf = 0.9; }
       else if (ambiguous) body = askWhich();
-      else { body = "vielen Dank für Ihre Rückmeldung. [AM: kein offener Termin gefunden]"; needs = true; reason = "Kein offener Termin gefunden"; conf = 0.4; }
+      else { body = "vielen Dank für Ihre Rückmeldung. Wir geben Ihre Zusage an Ihren Ansprechpartner weiter."; needs = true; reason = "Kein offener Termin gefunden"; conf = 0.4; }
       break;
     case "termin_verschieben":
       if (appt) { body = `vielen Dank für Ihre Nachricht. Wir haben Ihren Wunsch, den Termin am ${fmt(appt.starts_at)} zu verschieben, an Ihren Ansprechpartner weitergegeben. Er meldet sich mit möglichen Alternativen. Bitte beachten Sie, dass Ersatztermine bei Sammelbesichtigungen nur begrenzt möglich sind.`; act({ type: "termin_verschieben_wunsch", appointment_id: appt.id, text: i.newMessage.slice(0, 300) }); conf = 0.8; }
       else if (ambiguous) body = askWhich();
-      else { body = "vielen Dank für Ihre Nachricht. [AM: kein Termin gefunden]"; needs = true; reason = "Kein Termin gefunden"; conf = 0.4; }
+      else { body = "vielen Dank für Ihre Nachricht. Wir geben Ihren Wunsch, den Termin zu verschieben, an Ihren Ansprechpartner weiter. Er meldet sich mit möglichen Alternativen."; needs = true; reason = "Kein Termin gefunden"; conf = 0.4; }
       break;
     case "besichtigung_frage":
-      body = appt ? `Ihr Besichtigungstermin ist am ${fmt(appt.starts_at)}. Treffpunkt: ${appt.meeting_point}. Bitte bringen Sie einen Lichtbildausweis mit.` : "vielen Dank für Ihre Frage. [AM: bitte ergänzen]";
+      body = appt ? `Ihr Besichtigungstermin ist am ${fmt(appt.starts_at)}. Treffpunkt: ${appt.meeting_point}. Bitte bringen Sie einen Lichtbildausweis mit.` : "vielen Dank für Ihre Frage. Datum, Uhrzeit und Treffpunkt Ihrer Besichtigung finden Sie in Ihrer Einladungs-E-Mail und in Ihrem moovin Profil.";
       if (!appt) { needs = true; reason = "Kein Termin gefunden"; }
       conf = appt ? 0.85 : 0.4; break;
     case "objekt_frage": {
       const hits = await i.tools.searchKnowledge(text);
-      body = hits.length ? `vielen Dank für Ihre Frage. ${hits[0].body}` : "vielen Dank für Ihre Frage. [AM: bitte beantworten]";
+      body = hits.length ? `vielen Dank für Ihre Frage. ${hits[0].body}` : "vielen Dank für Ihre Frage. Ihr Ansprechpartner meldet sich dazu bei Ihnen.";
       needs = !hits.length; reason = needs ? "Keine passende Info in der Wissensdatenbank" : ""; conf = hits.length ? 0.7 : 0.3; break;
     }
     case "interesse_bestaetigen":
@@ -152,15 +152,15 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
       body = "vielen Dank für Ihre Rückmeldung. Wir haben vermerkt, dass Sie Ihre Bewerbung zurückziehen. Wir wünschen Ihnen alles Gute bei der Wohnungssuche.";
       if (app) act({ type: "interesse_setzen", application_id: app.id, interest: "zurueckgezogen" }); conf = 0.88; break;
     case "beschwerde":
-      body = "vielen Dank für Ihre Nachricht. Es tut uns leid, dass Sie unzufrieden sind. [AM: bitte persönlich antworten]"; needs = true; reason = "Beschwerde"; conf = 0.6; break;
+      body = "vielen Dank für Ihre Nachricht. Es tut uns leid, dass Sie unzufrieden sind. Ihr Ansprechpartner meldet sich persönlich bei Ihnen."; needs = true; reason = "Beschwerde"; conf = 0.6; break;
     case "nicht_zustaendig":
-      body = "vielen Dank für Ihre Nachricht. Für Anliegen zu bestehenden Mietverhältnissen ist die jeweilige Hausverwaltung zuständig. [AM: Ansprechpartner ergänzen]"; needs = true; reason = "Kein Interessenten-Anliegen"; conf = 0.6; break;
+      body = "vielen Dank für Ihre Nachricht. Für Anliegen zu bestehenden Mietverhältnissen ist die jeweilige Hausverwaltung zuständig; die Kontaktdaten finden Sie in Ihrem Mietvertrag."; needs = true; reason = "Kein Interessenten-Anliegen"; conf = 0.6; break;
     case "wohnungssuche_allgemein":
     case "konto_datenschutz":
     case "technik_login": {
       const q = intent === "wohnungssuche_allgemein" ? "Wohnung finden bewerben Suchagent" : intent === "konto_datenschutz" ? "Konto Daten löschen Datenschutz" : text;
       const hits = await i.tools.searchKnowledge(q);
-      body = hits.length ? `vielen Dank für Ihre Nachricht. ${hits[0].body.replace(/\s*Quelle:.*$/, "")}` : "vielen Dank für Ihre Nachricht. [AM: bitte beantworten]";
+      body = hits.length ? `vielen Dank für Ihre Nachricht. ${hits[0].body.replace(/\s*Quelle:.*$/, "")}` : "vielen Dank für Ihre Nachricht. Ihr Ansprechpartner meldet sich dazu bei Ihnen.";
       needs = !hits.length; reason = needs ? "Keine passende Info in der Wissensdatenbank" : ""; conf = hits.length ? 0.75 : 0.3;
       if (intent === "konto_datenschutz") {
         body = "vielen Dank für Ihre Nachricht. Wir haben Ihre Anfrage an unser Datenschutzteam weitergeleitet. Es bearbeitet sie und meldet sich bei Ihnen. Bitte beachten Sie, dass laufende Bewerbungen mit der Löschung enden.";
@@ -171,7 +171,7 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
     case "spam":
       body = ""; needs = true; reason = "Vermutlich Spam – ohne Antwort schließen"; conf = 0.7; break;
     default:
-      body = "vielen Dank für Ihre Nachricht. [AM: bitte beantworten]"; needs = true; reason = "Anliegen nicht eindeutig"; conf = 0.3;
+      body = "vielen Dank für Ihre Nachricht. Ihr Ansprechpartner meldet sich dazu bei Ihnen."; needs = true; reason = "Anliegen nicht eindeutig"; conf = 0.3;
   }
 
   const result: AgentResult = {

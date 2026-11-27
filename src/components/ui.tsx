@@ -42,6 +42,20 @@ export function fmtLong(d: Date | string | null | undefined) {
 }
 
 /** Kennzeichen für Testtickets (Testbatterie/Testmail): kein Versand, nicht in Kennzahlen. */
+/** Aufgabentext: erste Zeile = Titel, weitere Zeilen = Checkliste (eine Aufgabe je Ticket). */
+export function TaskText({ text, className = "" }: { text: string; className?: string }) {
+  const lines = String(text ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length <= 1) return <span className={className}>{lines[0] ?? ""}</span>;
+  return (
+    <span className={className}>
+      <span>{lines[0].replace(/^•\s*/, "")}</span>
+      <ul className="mt-1 space-y-0.5 text-xs text-ink/80">
+        {lines.slice(1).map((l, i) => <li key={i}>• {l.replace(/^•\s*/, "")}</li>)}
+      </ul>
+    </span>
+  );
+}
+
 export function TestBadge({ isTest }: { isTest?: boolean | null }) {
   if (!isTest) return null;
   return <span className="badge bg-violet-100 text-violet-800 font-semibold" title="Testticket: es geht nie eine Mail raus, zählt nicht in Kennzahlen" data-testid="badge-test">TEST</span>;

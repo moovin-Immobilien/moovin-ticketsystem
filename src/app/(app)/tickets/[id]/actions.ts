@@ -4,7 +4,7 @@ import { sql } from "@/lib/db";
 import { requireAgent, canSeeTicket } from "@/lib/auth";
 import { sendDraft, analyzeTicket, closeTicket, SendConflict } from "@/lib/pipeline";
 import { audit } from "@/lib/audit";
-import { addNote, mergeTickets, touchPresence, othersViewing, leavePresence, setTaskDone, effectiveAssignee } from "@/lib/workflow";
+import { addNote, mergeTickets, touchPresence, othersViewing, leavePresence, setTaskDone, effectiveAssignee, reopenTicket } from "@/lib/workflow";
 
 async function guard(ticketId: number) {
   const agent = await requireAgent();
@@ -34,6 +34,13 @@ export async function regenerateAction(ticketId: number) {
 export async function closeAction(ticketId: number) {
   const agent = await guard(ticketId);
   await closeTicket(ticketId, `am:${agent.email}`);
+  revalidatePath(`/tickets/${ticketId}`);
+  revalidatePath("/mein");
+}
+
+export async function reopenAction(ticketId: number) {
+  const agent = await guard(ticketId);
+  await reopenTicket(ticketId, `am:${agent.email}`);
   revalidatePath(`/tickets/${ticketId}`);
   revalidatePath("/mein");
 }

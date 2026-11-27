@@ -132,6 +132,43 @@ export function buildMail(run: string, c: TestCase, o: TestObject | null): Inbou
   };
 }
 
+// ---------- Läufe (Plan serverseitig, Fortsetzen nach Abbruch) ----------
+
+export async function saveRun(run: string, plan: PlanItem[], actor: string) {
+  await sql`insert into ticket.test_runs (run, plan, created_by) values (${run}, ${sql.json(plan as never)}, ${actor}) on conflict (run) do nothing`;
+}
+
+export type RunStatus = { run: string; total: number; done: number; failed: number; missing: PlanItem[]; results: Record<string, { ticketId: number | null; error: string | null; ms: number | null }> };
+
+/**
+ * Stand eines Laufs: Welche Fälle des gespeicherten Plans haben noch kein (erfolgreiches) Ergebnis?
+ * Die fehlenden werden mit demselben Objekt nachgeladen; Folgemails hängen weiter an ihrem Vorgänger.
+ */
+export async function runStatus(run: string): Promise<RunStatus | null> {
+  if (!RUN_RE.test(run)) return null;
+  const [r] = await sql`select plan from ticket.test_runs where run = ${run}`;
+  if (!r) return null;
+  const plan = (r.plan ?? []) as PlanItem[];
+  const rows = await sql`select case_key, ticket_id, error, duration_ms from ticket.test_results where test_run = ${run}`;
+  const results: RunStatus["results"] = {};
+  for (const x of rows) results[String(x.case_key)] = { ticketId: x.ticket_id === null ? null : Number(x.ticket_id), error: x.error ?? null, ms: x.duration_ms === null ? null : Number(x.duration_ms) };
+  const ok = (k: string) => !!results[k] && !results[k].error && !!results[k].ticketId;
+  const missing = plan.filter((p) => !ok(p.key));
+  return { run, total: plan.length, done: plan.filter((p) => ok(p.key)).length, failed: plan.filter((p) => results[p.key]?.error).length, missing, results };
+}
+
+/** Unvollständige Läufe (Plan gespeichert, nicht alle Fälle erfolgreich), neueste zuerst. */
+export async function incompleteRuns(limit = 5): Promise<RunStatus[]> {
+  const runs = await sql`select run from ticket.test_runs order by run desc limit 20`;
+  const out: RunStatus[] = [];
+  for (const r of runs) {
+    const st = await runStatus(String(r.run));
+    if (st && st.missing.length) out.push(st);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 // ---------- Einspielen eines Falls ----------
 
 export type CaseResult = { key: string; ok: boolean; ticketId: number | null; error?: string; ms: number };
@@ -174,7 +211,7 @@ export async function loadCase(run: string, key: string, objectId: string | null
 export type Actual = {
   intent: string | null; stufe: number | null; signals: string[]; faelle: string[];
   routing_source: string | null; assignee: string | null; sprache: string | null; auto: boolean;
-  platzhalter: boolean; aktionen: string[]; confidence: number | null; status: string; needs_human: boolean;
+  aktionen: string[]; confidence: number | null; status: string; needs_human: boolean;
 };
 
 /** Stand des Tickets direkt nach der Verarbeitung (Folgemails ändern später das Ticket, nicht diesen Stand). */
@@ -187,7 +224,7 @@ export async function snapshot(ticketId: number): Promise<Actual> {
   return {
     intent: t.intent ?? null, stufe: t.priority === null ? null : Number(t.priority), signals: signals.map((s) => s.type), faelle,
     routing_source: t.routing_source ?? null, assignee: t.assignee_email ?? null, sprache: t.language ?? null, auto: !!t.auto_handled,
-    platzhalter: /\[AM:/.test(String(d?.body_text ?? "")), aktionen: acts.map((a) => String(a.type)),
+    aktionen: acts.map((a) => String(a.type)),
     confidence: t.confidence === null ? null : Number(t.confidence), status: t.status, needs_human: !!t.needs_human,
   };
 }
@@ -208,7 +245,6 @@ export function compare(e: Expected, a: Actual | null): Check[] {
       ok: e.zuordnung ? (e.zuordnung === "allgemeiner_eingang" ? !a.assignee : a.routing_source === e.zuordnung && !!a.assignee) : null },
     { field: "Sprache", soll: v(e.sprache), ist: v(a.sprache), ok: e.sprache ? a.sprache === e.sprache : null },
     { field: "Auto", soll: e.auto === undefined ? "–" : e.auto ? "ja" : "nein", ist: a.auto ? "ja" : "nein", ok: e.auto !== undefined ? a.auto === e.auto : null },
-    { field: "[AM: …]", soll: "–", ist: a.platzhalter ? "ja" : "nein", ok: null },
     { field: "Aktion", soll: v(e.aktion), ist: a.aktionen.join(", ") || "–", ok: e.aktion ? a.aktionen.includes(e.aktion) : null },
   ];
 }
@@ -229,6 +265,7 @@ export async function deleteTestTickets(actor: string, run: string | null): Prom
       await tx`delete from ticket.tickets where id = any(${ids}::bigint[]) and is_test`;
     }
     await tx`delete from ticket.test_results where ${run ? tx`test_run = ${run}` : tx`true`}`;
+    await tx`delete from ticket.test_runs where ${run ? tx`run = ${run}` : tx`true`}`;
     return ids.length;
   });
   await audit(actor, "ticket", { event: "testtickets_geloescht", run: run ?? "alle", tickets: n });
