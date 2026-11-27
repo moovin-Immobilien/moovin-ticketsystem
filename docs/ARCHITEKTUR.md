@@ -54,7 +54,11 @@ Signal-Trefferquote, Auto-Quote, Überfällig, Team, Routing-Statistik) und erze
 
 Ticket-Intelligenz: `tickets.priority` (1 Chance, 2 zeitkritisch, 3 normal, 4 kein Handlungsbedarf), `tickets.signals` (Signal, Beleg,
 bestätigt, Basis Daten/Mail), `chance_at`/`chance_answered_at`/`chance_won_at` für die Messung, `tasks.priority`. Logik: `src/lib/signals.ts`
-(reine Funktionen, getestet), Aufgaben aus Fall B: `signalTasks` in `src/lib/workflow.ts`.
+(reine Funktionen, getestet), Aufgaben aus Fall B: `signalTasks` in `src/lib/workflow.ts`. Spam/Systemmails: `AUTO_CLOSE_INTENTS` und
+`autoClose` in `src/lib/pipeline.ts` (nur bei der ersten Mail eines Tickets; `tickets.auto_closed`, Migration 013). Datenschutz-Anliegen:
+Antwort mit CC an `DATENSCHUTZ_ADDRESS` (`messages.cc_email`), Aktion `datenschutz_weiterleiten` wird dann übersprungen. In der Ticketansicht
+werden alle manuellen Aktionen als eine Karte „Eine Aufgabe für den AM“ mit Checkliste gezeigt (DraftPanel). Testbatterie-Loader überspringt
+Stellplatz-/Garagen-Objekte.
 
 ## Autonomie-Entscheidung
 Auto-Versand nur wenn: Intent-Modus `auto` ∧ nicht gesperrt ∧ Konfidenz ≥ Schwelle ∧ `needs_human = false` ∧
