@@ -3,8 +3,8 @@ import { sql } from "@/lib/db";
 import { requireAgent, showTestTickets, testSql } from "@/lib/auth";
 import { maybeHousekeeping, WAIT_DAYS } from "@/lib/workflow";
 import { INTENT_LABEL, INTENTS, type Intent } from "@/lib/intents";
-import { StatusBadge, IntentBadge, fmtDateTime, fmtLong, TestBadge } from "@/components/ui";
-import { taskDoneAction, reviewedAction, closeAction } from "../tickets/[id]/actions";
+import { StatusBadge, IntentBadge, fmtDateTime, fmtLong, TestBadge, TaskText } from "@/components/ui";
+import { taskDoneAction, reviewedAction, closeAction, reopenAction } from "../tickets/[id]/actions";
 import { markClass, WhyLine } from "@/components/signals";
 import type { Signal } from "@/lib/signals";
 
@@ -13,6 +13,7 @@ const TABS = [
   { key: "aufgaben", label: "Offene Aufgaben" },
   { key: "wartet", label: "Wartet auf Bewerber" },
   { key: "auto", label: "Automatisch erledigt" },
+  { key: "erledigt", label: "Erledigt" },
 ] as const;
 type Tab = (typeof TABS)[number]["key"];
 
@@ -32,6 +33,7 @@ export default async function MeinBereich(props: PageProps<"/mein">) {
       (select count(*) from ticket.tasks k join ticket.tickets t on t.id = k.ticket_id where k.assignee_email = ${me} and k.status = 'offen' and ${tests}) as aufgaben,
       (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.status = 'wartet' and ${tests}) as wartet,
       (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.auto_handled and t.reviewed_at is null and t.merged_into is null and ${tests}) as auto_unread,
+      (select count(*) from ticket.tickets t where ${doneByMe(me)} and ${tests}) as erledigt,
       (select count(*) from ticket.tickets t where t.assignee_email = ${me} and t.status in ('neu','in_bearbeitung','entwurf') and t.priority = 1 and ${tests})
         + (select count(*) from ticket.tasks k join ticket.tickets t on t.id = k.ticket_id where k.assignee_email = ${me} and k.status = 'offen' and k.priority = 1 and ${tests}) as chancen`;
 
@@ -69,11 +71,37 @@ export default async function MeinBereich(props: PageProps<"/mein">) {
       {tab === "aufgaben" && <Aufgaben me={me} tests={tests} />}
       {tab === "wartet" && <Wartet me={me} tests={tests} />}
       {tab === "auto" && <Auto me={me} intent={intentFilter} tests={tests} />}
+      {tab === "erledigt" && <Erledigt me={me} tests={tests} />}
     </div>
   );
 }
 
 type Frag = ReturnType<typeof testSql>;
+
+// „Erledigt“: von mir beantwortete oder geschlossene Tickets der letzten 30 Tage (nicht automatisch beantwortete – die stehen unter „Automatisch erledigt“)
+const DONE_DAYS = 30;
+const doneByMe = (me: string) => sql`t.status in ('beantwortet','geschlossen') and t.merged_into is null and not t.auto_handled
+  and (t.assignee_email = ${me} or exists (select 1 from ticket.messages m where m.ticket_id = t.id and m.direction = 'out' and m.sent_by = ${"am:" + me}))
+  and greatest(t.updated_at, coalesce(t.closed_at, t.updated_at)) > now() - make_interval(days => ${DONE_DAYS})`;
+
+async function Erledigt({ me, tests }: { me: string; tests: Frag }) {
+  const rows = await sql`select t.*, (select max(m.created_at) from ticket.messages m where m.ticket_id = t.id and m.direction = 'out') as last_out
+    from ticket.tickets t where ${doneByMe(me)} and ${tests}
+    order by greatest(t.updated_at, coalesce(t.closed_at, t.updated_at)) desc limit 200`;
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted">Von Ihnen beantwortete oder geschlossene Tickets der letzten {DONE_DAYS} Tage. Neue Mails des Absenders öffnen ein Ticket automatisch wieder.</p>
+      <TicketTable rows={rows} empty="Noch nichts erledigt." extra={(t) => (
+        <span className="flex items-center gap-2 text-xs text-muted">
+          {t.status === "beantwortet" ? `beantwortet ${fmtLong(t.last_out ?? t.updated_at)}` : `geschlossen ${fmtLong(t.closed_at ?? t.updated_at)}`}
+          <form action={reopenAction.bind(null, Number(t.id))} className="inline">
+            <button className="badge bg-white border border-line text-navy hover:bg-canvas" data-testid={`reopen-${t.id}`}>Wiedereröffnen</button>
+          </form>
+        </span>
+      )} />
+    </div>
+  );
+}
 
 async function Todo({ me, tests }: { me: string; tests: Frag }) {
   const rows = await sql`select t.*, (select count(*) from ticket.tasks k where k.ticket_id = t.id and k.status = 'offen') as open_tasks
@@ -130,7 +158,7 @@ async function Aufgaben({ me, tests, onlyChances }: { me: string; tests: Frag; o
               <div className="text-sm text-ink">
                 {Number(k.priority) === 1 && <span className="badge bg-emerald-50 text-emerald-700 mr-2">▲ Abschluss-Chance</span>}
                 {Number(k.priority) === 2 && <span className="badge bg-orange-50 text-orange-700 mr-2">⏱ Zeitkritisch</span>}
-                {k.text}
+                <TaskText text={k.text} />
               </div>
               <div className="text-xs text-muted">
                 <Link className="underline" href={`/tickets/${k.ticket_id}`}>T-{k.ticket_id}</Link> <TestBadge isTest={k.is_test} /> · {k.sender_name || k.sender_email}{k.object_title ? ` · ${k.object_title}` : ""} · <span className="badge bg-canvas">{k.type}</span>
