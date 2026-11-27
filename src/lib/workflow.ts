@@ -107,13 +107,13 @@ export async function signalTasks(ticketId: number, createNew: boolean) {
   }
 }
 
-/** Wiedereröffnen durch den AM (Reiter „Erledigt“): beantwortete oder geschlossene Tickets zurück in die Bearbeitung. */
+/** Wiedereöffnen durch den AM (Reiter „Erledigt“): beantwortete oder geschlossene Tickets zurück in die Bearbeitung. */
 export async function reopenTicket(ticketId: number, actor: string) {
-  const [t] = await sql`update ticket.tickets set status = 'in_bearbeitung', reopened_at = now(), closed_at = null, auto_handled = false,
+  const [t] = await sql`update ticket.tickets set status = 'in_bearbeitung', reopened_at = now(), closed_at = null, auto_handled = false, auto_closed = false,
             waiting_since = null, waiting_reminded_at = null, due_at = coalesce(due_at, ${dueDate(new Date())}), updated_at = now()
             where id = ${ticketId} and status in ('beantwortet','geschlossen','wartet') and merged_into is null returning id`;
-  if (!t) throw new Error("Ticket kann nicht wiedereröffnet werden");
-  await addNote(ticketId, actor.replace(/^am:/, ""), "Ticket manuell wiedereröffnet.", "system");
+  if (!t) throw new Error("Ticket kann nicht wiedereöffnet werden");
+  await addNote(ticketId, actor.replace(/^am:/, ""), "Ticket manuell wiedereöffnet.", "system");
   await audit(actor, "ticket", { event: "wiedereroeffnet", manuell: true }, ticketId);
 }
 
