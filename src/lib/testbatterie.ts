@@ -65,7 +65,8 @@ export async function planRun(run: string, keys: string[]): Promise<PlanItem[]> 
   const cases = TEST_CASES.filter((c) => wanted.has(c.key));
 
   const rows = await sql<TestObject[]>`select object_id, street, zip, city, title from ticket.crm_objects
-    where live and active and am_email is not null and street is not null and match_key is not null order by object_id`;
+    where live and active and am_email is not null and street is not null and match_key is not null
+      and coalesce(title, '') !~* 'stellpl|garage|tiefgarage|parkplatz' and coalesce(street, '') !~* 'stellpl|garage' order by object_id`;
   const r = rng(run);
   // Städte gemischt: je Stadt mischen, Städte mischen, dann reihum ziehen
   const byCity = new Map<string, TestObject[]>();

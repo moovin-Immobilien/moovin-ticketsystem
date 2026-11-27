@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "stand": "2026-11-26",
+  "stand": "2026-11-27",
   "hinweise": [
     "Platzhalter fuellt der Loader beim Einspielen: {{ADRESSE}} = 'Strasse Hausnummer', {{PLZ_ORT}} = 'PLZ Ort', {{ID}} = moovin-ID, jeweils aus ticket.crm_objects (live = true, active = true, am_email gesetzt). Pro Fall ein anderes Objekt, Staedte gemischt.",
     "Faelle mit 'objekt': false bekommen bewusst kein Objekt (Allgemeiner Eingang erwartet).",
@@ -73,7 +73,7 @@
       "from": "sophie.krueger@example.org", "name": "Sophie Krüger", "verified": true, "objekt": true,
       "subject": "Dringend: Entscheidung bis Freitag",
       "body": "Hallo,\n\nich habe mich auf die Wohnung {{ADRESSE}} beworben und war auch bei der Besichtigung. Jetzt habe ich eine Zusage für eine andere Wohnung und muss mich dort bis Freitag 12 Uhr entscheiden. Ihre Wohnung wäre mir aber deutlich lieber. Können Sie mir sagen, ob ich Chancen habe?\n\nVielen Dank und viele Grüße\nSophie Krüger",
-      "erwartet": { "intent": "bewerbungsstatus", "stufe": 1, "signal": "konkurrenz_frist", "fall": "C" }
+      "erwartet": { "intent": "interesse_bestaetigen", "stufe": 1, "signal": "konkurrenz_frist", "fall": "C" }
     },
     {
       "key": "termin_zusage_antwort",
@@ -143,14 +143,14 @@
       "from": "carlos.martinez@example.com", "name": "Carlos Martínez", "verified": true, "objekt": true,
       "subject": "Application without SCHUFA",
       "body": "Hi,\n\nI moved from Madrid to Berlin two months ago for a new job (permanent contract, gross 68k). I don't have a SCHUFA yet. Can I still apply for the apartment at {{ADRESSE}}? Which documents should I upload instead?\n\nThanks a lot,\nCarlos",
-      "erwartet": { "intent": "wohnungssuche_allgemein", "stufe": 3, "sprache": "en" }
+      "erwartet": { "intent": "unterlagen_nachreichen", "stufe": 3, "sprache": "en" }
     },
     {
       "key": "gemeinsam_bewerben",
       "from": "hannah.meier@example.net", "name": "Hannah Meier", "verified": true, "objekt": true,
       "subject": "Bewerbung mit Partner",
       "body": "Hallo,\n\nmein Freund und ich möchten uns gemeinsam auf die Wohnung {{ADRESSE}} bewerben. Muss er sich separat registrieren oder kann ich ihn in meiner Bewerbung angeben? Wir sollen beide in den Mietvertrag.\n\nLiebe Grüße\nHannah",
-      "erwartet": { "intent": "technik_login", "stufe": 3 }
+      "erwartet": { "intent": "unterlagen_nachreichen", "stufe": 3 }
     },
     {
       "key": "rueckzug_frueh",
@@ -312,14 +312,14 @@
       "from": "robert.schroeder@example.org", "name": "Robert Schröder", "verified": true, "objekt": true,
       "subject": "Wohnung {{ADRESSE}} - wir zahlen auch mehr",
       "body": "Hallo,\n\nwir sind eine kleine Familie (ein Kind, 4 Jahre) und suchen seit über einem Jahr. Die {{ADRESSE}} wäre perfekt, weil die Kita direkt um die Ecke ist. Wir würden auch 150 € mehr Miete im Monat zahlen und die Küche zum vollen Preis übernehmen, wenn wir den Vorzug bekommen. Bitte geben Sie uns eine Chance!\n\nFamilie Schröder",
-      "erwartet": { "intent": "bewerbungsstatus", "stufe": 3, "hinweis": "keine Zusage, kein Vorzug, kein Mehrpreis" }
+      "erwartet": { "intent": "interesse_bestaetigen", "stufe": 3, "hinweis": "keine Zusage, kein Vorzug, kein Mehrpreis" }
     },
     {
       "key": "uebergabe",
       "from": "anja.schmitz@example.net", "name": "Anja Schmitz", "verified": true, "objekt": true,
       "subject": "Schlüsselübergabe",
       "body": "Hallo,\n\nder Mietvertrag für die {{ADRESSE}} ist unterschrieben, Mietbeginn ist der 01.12. Wann und mit wem findet die Schlüsselübergabe statt? Ich müsste mir dafür frei nehmen.\n\nViele Grüße\nAnja Schmitz",
-      "erwartet": { "intent": "sonstiges", "stufe": 1, "signal": "vertragsphase", "fall": "C" }
+      "erwartet": { "intent": "objekt_frage", "stufe": 1, "signal": "vertragsphase", "fall": "C" }
     }
   ]
 }

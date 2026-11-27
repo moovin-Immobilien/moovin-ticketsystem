@@ -39,23 +39,40 @@ export function DraftPanel(props: { ticketId: number; draftId: number | null; dr
         <p className="mt-1 text-xs text-muted">Die moovin-Signatur (Hilfecenter-Link, Firmenangaben, Datenschutz) wird beim Versand automatisch angehängt.</p>
       </div>
 
-      {props.actions.length > 0 && (
-        <div>
-          <div className="label">Aktionen nach Freigabe</div>
-          <ul className="space-y-2">
-            {props.actions.map((a) => (
-              <li key={a.id} className={`flex items-start gap-3 rounded-lg border px-3 py-2 text-sm ${a.status === "blockiert" ? "border-amber-200 bg-amber-50" : "border-line bg-white"}`}>
-                <input type="checkbox" className="mt-0.5 accent-navy" disabled={a.status !== "vorgeschlagen"} checked={selected.includes(a.id)}
-                  onChange={(e) => setSelected((s) => (e.target.checked ? [...s, a.id] : s.filter((x) => x !== a.id)))} />
-                <div>
-                  <div className={a.status === "blockiert" ? "text-amber-800" : "text-ink"}>{a.label}</div>
-                  {a.blocked_reason && <div className="text-xs text-amber-700">{a.blocked_reason}</div>}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {props.actions.length > 0 && (() => {
+        // Eine Aufgabe je Ticket: alle manuellen Punkte („Aufgabe für den AM …“) als eine Karte mit Checkliste, so wie sie später in Mein Bereich steht
+        const manual = props.actions.filter((a) => /^Aufgabe für den AM/.test(a.label));
+        const other = props.actions.filter((a) => !manual.includes(a));
+        const head = manual[0]?.label.match(/^Aufgabe für den AM(?: \(([^)]*)\))?: /);
+        const row = (a: Action, text: string) => (
+          <li key={a.id} className="flex items-start gap-3 text-sm">
+            <input type="checkbox" className="mt-0.5 accent-navy" disabled={a.status !== "vorgeschlagen"} checked={selected.includes(a.id)}
+              onChange={(e) => setSelected((s) => (e.target.checked ? [...s, a.id] : s.filter((x) => x !== a.id)))} />
+            <div>
+              <div className={a.status === "blockiert" ? "text-amber-800" : "text-ink"}>{text}</div>
+              {a.blocked_reason && <div className="text-xs text-amber-700">{a.blocked_reason}</div>}
+            </div>
+          </li>
+        );
+        return (
+          <div>
+            <div className="label">Aktionen nach Freigabe</div>
+            <ul className="space-y-2">
+              {manual.length > 0 && (
+                <li className="rounded-lg border border-line bg-white px-3 py-2" data-testid="manual-task">
+                  <div className="text-sm font-medium text-navy">Eine Aufgabe für den AM{head?.[1] ? <span className="font-normal text-muted"> · {head[1]}</span> : null}</div>
+                  <ul className="mt-1 space-y-1">{manual.map((a) => row(a, a.label.replace(/^Aufgabe für den AM(?: \([^)]*\))?: /, "• ")))}</ul>
+                </li>
+              )}
+              {other.map((a) => (
+                <li key={a.id} className={`rounded-lg border px-3 py-2 ${a.status === "blockiert" ? "border-amber-200 bg-amber-50" : "border-line bg-white"}`}>
+                  <ul>{row(a, a.label)}</ul>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })()}
 
       <label className="flex items-center gap-2 text-sm text-ink">
         <input type="checkbox" name="awaitReply" className="accent-navy" checked={awaitReply} onChange={(e) => setAwaitReply(e.target.checked)} />

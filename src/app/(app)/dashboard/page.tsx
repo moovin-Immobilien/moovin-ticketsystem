@@ -22,7 +22,8 @@ export default async function Dashboard() {
       count(*) filter (where status not in ('beantwortet','geschlossen','wartet')) as offen,
       count(*) filter (where status not in ('beantwortet','geschlossen','wartet') and due_at < now()) as ueberfaellig,
       count(*) filter (where status = 'wartet') as wartet,
-      count(*) filter (where status not in ('beantwortet','geschlossen') and assignee_email is null) as eingang
+      count(*) filter (where status not in ('beantwortet','geschlossen') and assignee_email is null) as eingang,
+      count(*) filter (where auto_closed and created_at > now() - interval '30 days') as auto_geschlossen
     from ticket.tickets where merged_into is null and not is_test`;
   const auto = await sql`select intent, count(*) as total, count(*) filter (where auto_handled) as auto
     from ticket.tickets where first_response_at is not null and created_at > now() - interval '30 days' and intent is not null and not is_test
@@ -55,11 +56,12 @@ export default async function Dashboard() {
   return (
     <div className="space-y-5" data-testid="dashboard">
       <h1 className="text-xl font-semibold text-navy">Dashboard</h1>
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
         <Kpi label="Offen" value={st.offen} />
         <Kpi label="Überfällig" value={st.ueberfaellig} warn={Number(st.ueberfaellig) > 0} />
         <Kpi label="Wartet auf Bewerber" value={st.wartet} />
         <Kpi label="Allgemeiner Eingang" value={st.eingang} />
+        <Kpi label="Automatisch geschlossen (30 T.)" value={st.auto_geschlossen} />
         <Kpi label="Erste Antwort (Median, 30 T.)" value={min(rt.median)} />
         <Kpi label="Erste Antwort (90 %, 30 T.)" value={min(rt.p90)} />
       </div>

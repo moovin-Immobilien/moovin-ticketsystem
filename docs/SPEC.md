@@ -165,6 +165,13 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
   Der Entwurf behauptet nie, etwas sei in moovin vermerkt oder erledigt; „geben wir weiter“/„legen wir ab“ nur für Punkte, die der AM beim Freigeben als Aufgabe erledigt.
 - Auto-Versand nur für allgemeine Anliegen (Wohnungssuche, Datenschutz, Login) und nie mit Aufgabe.
 - **An:** Verhalten wie zuvor; das CRM ergänzt nur, wenn moovin keinen AM liefert.
+- Antwortstil ohne moovin-API (Feedback-Paket 2): Die Antwort ist eine Wegweisung, kein Vermerk – Termine zu-/absagen über den Link in der
+  Einladungsmail, Mietinteresse über den Button in der Mail „Wollen Sie die Wohnung mieten?“, Unterlagen/Stand/Löschung im Login, Fragen zur
+  Wohnung über das Exposé, Eigentümer über das Kontaktformular moovin.de/vermieten. „Geben wir weiter“ nur bei Unterlagen, Anmietwunsch/Frist,
+  Rückzug und Beschwerde (dort entsteht die eine Aufgabe für den AM); kein „Ihr Ansprechpartner meldet sich“ als Fallback. Jede Antwort endet
+  mit dem Hinweis auf den Login. Bei Datenschutz-Anliegen geht die Antwort mit datenschutz@moovin.de in Kopie (`messages.cc_email`), die
+  separate Weiterleitung entfällt.
+
 
 ### 4.12 Ticket-Intelligenz: Chancen erkennen, richtig sortieren
 Konzept: `claude/ticket-intelligenz.md` im Projekt. Grundsatz: **Priorisiert wird der Vorgang, nie die Person** (keine Signale zu Einkommen,
@@ -180,8 +187,10 @@ Bonität, Herkunft o. Ä.; unbekannte Werte verwirft der Server).
   - Ohne Bestätigung nur Hinweis (Stufe 3). moovin-Anbindung aus: Signal gilt „laut Mail“ (gestrichelt), Stufe bleibt.
 - Automatisch bearbeitete Tickets: **Fall B** (Unterlagen, Absage < 48 h, später Rückzug) → Auto-Antwort erlaubt, dazu markierte
   Aufgabe ganz oben („Unterlagen prüfen“, „Slot nachbesetzen“, „Nächsten Kandidaten aktivieren“); bei Freigabe durch den AM wird eine
-  passende Aufgabe hochgestuft. **Fall C** (Anmietwunsch, Vertrag, Frist, Eskalation) → nie automatisch. **Fall D** → kein Entwurf, unten mit
-  „Ohne Antwort schließen“.
+  passende Aufgabe hochgestuft. **Fall C** (Anmietwunsch, Vertrag, Frist, Eskalation) → nie automatisch. **Fall D** („Danke, bis Montag“) → kurzer Entwurf
+  mit Login-Hinweis, unten mit „Ohne Antwort schließen“. Spam und Systemmails (Bounce, Abwesenheitsnotiz, Newsletter) werden bei der ersten
+  Mail eines Tickets **automatisch geschlossen** (`auto_closed`, Audit `automatisch_geschlossen`), tauchen in keiner Arbeitsliste auf und öffnen
+  sich bei einer echten Antwort wieder; Eskalation zählt nur bei Anliegen, für die moovin zuständig ist.
 - Sortierung in „Zu erledigen“ und „Offene Aufgaben“: Stufe 1 → Stufe 2 → Überfällige → Fälligkeit → Stufe 4. Farbbalken, Zeile
   „Warum oben?“ mit Beleg, Zähler/Filter „Chancen“, Karte „Ticket-Intelligenz“ im Ticket mit „Markierung passt nicht“.
 - SLA nach Stufe: Stufe 1 in 2, Stufe 2 in 4 Arbeitsstunden (Mo–Fr 8–18 Uhr); Frist im Text → fällig am Vortag 12 Uhr.

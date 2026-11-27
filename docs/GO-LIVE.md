@@ -56,6 +56,10 @@ datenschutz@), es gibt keinen Auto-Versand und keine Schreibaufrufe an moovin. Z
 7. Erkenntnisse aus dem ersten Prüfdurchgang (27.11.2026) sind umgesetzt: keine `[AM: …]`-Platzhalter mehr (neutrale, versandfertige
    Entwürfe), keine Behauptungen über Erledigtes ohne moovin-Schreibzugriff, Vertragsweg/Kaution/Übergabe nur allgemein, eine Aufgabe je
    Ticket (Checkliste), Reiter „Erledigt“ in Mein Bereich.
+8. Zweiter Prüfdurchgang (Feedback-Paket 2, 27.11.2026): Antworten führen den Interessenten zurück in den Prozess (Einladungsmail-Link,
+   Button in „Wollen Sie die Wohnung mieten?“, Login, Exposé, Kontaktformular für Eigentümer) statt „Ihr Ansprechpartner meldet sich“;
+   Spam und Systemmails werden automatisch geschlossen; Datenschutz-Antworten gehen mit datenschutz@ in Kopie; der Loader nimmt keine
+   Stellplatz-Objekte mehr. Erwartete Trefferquoten nach dem dritten Lauf: Anliegen ≥ 90 %, Stufe ≥ 95 %.
 
 ## Phase 2 · Schattenbetrieb (1 Woche)
 

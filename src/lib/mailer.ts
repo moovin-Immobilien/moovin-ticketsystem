@@ -4,7 +4,7 @@ import { audit } from "./audit";
 import { sql } from "./db";
 import { withSignature } from "./signature";
 
-export type OutMail = { to: string; subject: string; text: string; html?: string; inReplyTo?: string | null; references?: string | null; messageId: string; ticketId: number };
+export type OutMail = { to: string; cc?: string[]; subject: string; text: string; html?: string; inReplyTo?: string | null; references?: string | null; messageId: string; ticketId: number };
 export type Delivery = "gesendet" | "simuliert" | "fehler";
 
 function parseFrom(from: string): { name: string; email: string } {
@@ -43,7 +43,7 @@ async function deliver(m: OutMail): Promise<{ delivery: Delivery; providerMessag
   // Harte Testsperre vor jedem Versanddienst (Antworten, interne Mails, Auto-Versand – alles läuft hier durch)
   const locked = await testLock(m);
   if (locked) {
-    await audit("system", "mail_out", { to: m.to, subject: m.subject, mode: "test_gesperrt", reason: locked }, m.ticketId);
+    await audit("system", "mail_out", { to: m.to, cc: m.cc ?? [], subject: m.subject, mode: "test_gesperrt", reason: locked }, m.ticketId);
     return { delivery: "simuliert", providerMessageId: null };
   }
   const provider = env.mailProvider();
@@ -56,6 +56,7 @@ async function deliver(m: OutMail): Promise<{ delivery: Delivery; providerMessag
         body: JSON.stringify({
           sender: { email: from.email, ...(from.name ? { name: from.name } : {}) },
           to: [{ email: m.to }],
+          ...(m.cc?.length ? { cc: m.cc.map((email) => ({ email })) } : {}),
           replyTo: { email: env.inboundAddress() },
           subject: m.subject,
           textContent: m.text,
@@ -65,7 +66,7 @@ async function deliver(m: OutMail): Promise<{ delivery: Delivery; providerMessag
         signal: AbortSignal.timeout(15_000),
       });
       const data = (await res.json().catch(() => ({}))) as { messageId?: string };
-      await audit("system", "mail_out", { to: m.to, subject: m.subject, mode: "brevo", status: res.status }, m.ticketId);
+      await audit("system", "mail_out", { to: m.to, cc: m.cc ?? [], subject: m.subject, mode: "brevo", status: res.status }, m.ticketId);
       return { delivery: res.ok ? "gesendet" : "fehler", providerMessageId: res.ok ? data.messageId ?? null : null };
     } catch (e) {
       await audit("system", "mail_out", { to: m.to, subject: m.subject, mode: "brevo", error: (e as Error).message }, m.ticketId);
@@ -80,17 +81,17 @@ async function deliver(m: OutMail): Promise<{ delivery: Delivery; providerMessag
       const res = await fetch("https://api.postmarkapp.com/email", {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json", "X-Postmark-Server-Token": env.postmarkToken() },
-        body: JSON.stringify({ From: env.fromAddress(), To: m.to, ReplyTo: env.inboundAddress(), Subject: m.subject, TextBody: m.text, ...(m.html ? { HtmlBody: m.html } : {}), Headers: headers, MessageStream: "outbound" }),
+        body: JSON.stringify({ From: env.fromAddress(), To: m.to, ...(m.cc?.length ? { Cc: m.cc.join(",") } : {}), ReplyTo: env.inboundAddress(), Subject: m.subject, TextBody: m.text, ...(m.html ? { HtmlBody: m.html } : {}), Headers: headers, MessageStream: "outbound" }),
         signal: AbortSignal.timeout(15_000),
       });
-      await audit("system", "mail_out", { to: m.to, subject: m.subject, mode: "postmark", status: res.status }, m.ticketId);
+      await audit("system", "mail_out", { to: m.to, cc: m.cc ?? [], subject: m.subject, mode: "postmark", status: res.status }, m.ticketId);
       return { delivery: res.ok ? "gesendet" : "fehler", providerMessageId: null };
     } catch (e) {
       await audit("system", "mail_out", { to: m.to, subject: m.subject, mode: "postmark", error: (e as Error).message }, m.ticketId);
       return { delivery: "fehler", providerMessageId: null };
     }
   }
-  await audit("system", "mail_out", { to: m.to, subject: m.subject, mode: "simuliert", provider }, m.ticketId);
+  await audit("system", "mail_out", { to: m.to, cc: m.cc ?? [], subject: m.subject, mode: "simuliert", provider }, m.ticketId);
   return { delivery: "simuliert", providerMessageId: null };
 }
 
