@@ -92,14 +92,14 @@ export async function runDemoAgent(i: AgentInput): Promise<AgentOutput> {
         body = "vielen Dank für Ihre Nachricht. Wir haben Ihren Wunsch, den Termin zu verschieben, an Ihren Ansprechpartner weitergegeben. Er meldet sich mit möglichen Alternativen.";
         act({ type: "termin_verschieben_wunsch", manual: true, text: i.newMessage.slice(0, 300) }); conf = 0.8; break;
       case "interesse_bestaetigen":
-        body = "vielen Dank für Ihre Nachricht. Ihren Wunsch, die Wohnung anzumieten, geben wir an den zuständigen Ansprechpartner weiter. Bitte bestätigen Sie Ihr Mietinteresse zusätzlich über den Button in der E-Mail, die Sie nach der Besichtigung erhalten haben – falls Sie das bereits getan haben, ist nichts weiter nötig. Ihr Ansprechpartner meldet sich zu den nächsten Schritten."; act({ type: "interesse_setzen", interest: "interessiert", manual: true }); conf = 0.85; break;
+        body = "vielen Dank für Ihre Nachricht. Ihren Wunsch, die Wohnung anzumieten, geben wir an den zuständigen Ansprechpartner weiter. Bitte bestätigen Sie Ihr Mietinteresse zusätzlich über den Button in der E-Mail „Wollen Sie die Wohnung mieten?“ – falls Sie das bereits getan haben, ist nichts weiter nötig. Ihr Ansprechpartner meldet sich zu den nächsten Schritten."; act({ type: "interesse_setzen", interest: "interessiert", manual: true }); conf = 0.85; break;
       case "rueckzug":
         body = "vielen Dank für Ihre Rückmeldung. Wir geben Ihren Rückzug an Ihren Ansprechpartner weiter. Wir wünschen Ihnen alles Gute bei der Wohnungssuche.";
         act({ type: "interesse_setzen", interest: "zurueckgezogen", manual: true }); conf = 0.88; break;
       case "besichtigung_frage":
         body = `vielen Dank für Ihre Frage${obj}. Datum, Uhrzeit und Treffpunkt Ihrer Besichtigung finden Sie in Ihrer Einladungs-E-Mail und in Ihrem moovin Profil. Bitte kommen Sie pünktlich zum dort genannten Treffpunkt.`; needs = true; reason = "moovin-Anbindung aus: Termin bitte in moovin nachsehen"; break;
       case "bewerbungsstatus":
-        body = `vielen Dank für Ihre Nachricht${obj}. Haben Sie Ihr Interesse an der Wohnung nach der Besichtigung über den Button in der E-Mail, die Sie nach der Besichtigung erhalten haben, bereits bestätigt? Dies ist Voraussetzung für den weiteren Prozess. Bitte prüfen Sie Ihren moovin Login, hier erscheinen alle notwendigen nächsten Schritte und Sie können den Stand der Bewerbung einsehen.`; needs = true; reason = "moovin-Anbindung aus: Stand bitte in moovin nachsehen"; break;
+        body = `vielen Dank für Ihre Nachricht${obj}. Haben Sie Ihr Interesse an der Wohnung nach der Besichtigung über den Button in der E-Mail „Wollen Sie die Wohnung mieten?“ bereits bestätigt? Dies ist Voraussetzung für den weiteren Prozess. Bitte prüfen Sie Ihren moovin Login, hier erscheinen alle notwendigen nächsten Schritte und Sie können den Stand der Bewerbung einsehen.`; needs = true; reason = "moovin-Anbindung aus: Stand bitte in moovin nachsehen"; break;
       case "objekt_frage": {
         const hits = await i.tools.searchKnowledge(text);
         body = hits.length ? `vielen Dank für Ihre Frage. ${hits[0].body}` : `vielen Dank für Ihre Frage${obj}. Ihr Ansprechpartner meldet sich dazu bei Ihnen.`;
