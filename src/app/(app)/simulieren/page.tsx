@@ -2,7 +2,7 @@ import Link from "next/link";
 import { requireAgent } from "@/lib/auth";
 import { sql } from "@/lib/db";
 import { SAMPLES } from "@/lib/samples";
-import { TEST_CASES } from "@/lib/testbatterie";
+import { TEST_CASES, incompleteRuns } from "@/lib/testbatterie";
 import { SimForm } from "./SimForm";
 import { Testbatterie } from "./Testbatterie";
 import { deleteTestTicketsAction } from "./actions";
@@ -16,6 +16,7 @@ export default async function SimPage(props: PageProps<"/simulieren">) {
   const sp = await props.searchParams;
   const runs = admin ? await sql`select test_run, count(*) as n, min(created_at) as at from ticket.tickets where is_test and test_run is not null group by test_run order by test_run desc limit 30` : [];
   const [tc] = admin ? await sql`select count(*) as n from ticket.tickets where is_test` : [{ n: 0 }];
+  const openRuns = admin ? (await incompleteRuns()).map((r) => ({ run: r.run, total: r.total, done: r.done, failed: r.failed })) : [];
   const deleted = typeof sp.geloescht === "string" ? sp.geloescht : null;
   return (
     <div className="space-y-5">
@@ -53,7 +54,7 @@ export default async function SimPage(props: PageProps<"/simulieren">) {
             <Link href="/simulieren/bericht" className="text-sm text-navy underline">Testberichte →</Link>
           </div>
           <Testbatterie cases={TEST_CASES.map((c) => ({ key: c.key, name: c.name, subject: c.subject, intent: c.erwartet.intent ?? "–", stufe: c.erwartet.stufe ?? null,
-            objekt: c.objekt, folgtAuf: c.folgt_auf ?? null, anhaenge: c.anhaenge?.length ?? 0 }))} />
+            objekt: c.objekt, folgtAuf: c.folgt_auf ?? null, anhaenge: c.anhaenge?.length ?? 0 }))} openRuns={openRuns} />
 
           <form action={deleteTestTicketsAction} className="rounded-lg border border-line p-4 flex flex-wrap items-center gap-3" data-testid="testtickets-loeschen">
             <span className="font-medium text-navy">Testtickets löschen</span>
