@@ -2,9 +2,9 @@
 import { revalidatePath } from "next/cache";
 import { sql } from "@/lib/db";
 import { requireAgent, canSeeTicket } from "@/lib/auth";
-import { sendDraft, analyzeTicket, closeTicket, reopenTicket, SendConflict } from "@/lib/pipeline";
+import { sendDraft, analyzeTicket, closeTicket, SendConflict } from "@/lib/pipeline";
 import { audit } from "@/lib/audit";
-import { addNote, mergeTickets, touchPresence, othersViewing, leavePresence, setTaskDone, effectiveAssignee } from "@/lib/workflow";
+import { addNote, mergeTickets, touchPresence, othersViewing, leavePresence, setTaskDone, effectiveAssignee, reopenTicket } from "@/lib/workflow";
 
 async function guard(ticketId: number) {
   const agent = await requireAgent();
