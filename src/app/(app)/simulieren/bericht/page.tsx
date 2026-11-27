@@ -61,7 +61,7 @@ export default async function Bericht(props: PageProps<"/simulieren/bericht">) {
               <thead className="bg-canvas text-left text-xs uppercase tracking-wide text-muted">
                 <tr>
                   <th className="px-3 py-2.5">Fall</th>
-                  {["Anliegen", "Stufe", "Signale", "Fall", "Zuordnung", "Sprache", "Auto", "[AM: …]", "Aktion"].map((h) => <th key={h} className="px-3 py-2.5">{h}</th>)}
+                  {["Anliegen", "Stufe", "Signale", "Fall", "Zuordnung", "Sprache", "Auto", "Aktion"].map((h) => <th key={h} className="px-3 py-2.5">{h}</th>)}
                 </tr>
               </thead>
               <tbody>

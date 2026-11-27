@@ -2,7 +2,7 @@ import Link from "next/link";
 import { sql } from "@/lib/db";
 import { requireAgent, showTestTickets, testSql } from "@/lib/auth";
 import { knownObjects } from "@/lib/objects";
-import { StatusBadge, IntentBadge, fmtDateTime, TestBadge } from "@/components/ui";
+import { StatusBadge, IntentBadge, fmtDateTime, TestBadge, TaskText } from "@/components/ui";
 import { assignAction, taskDoneAction } from "../tickets/[id]/actions";
 
 /** Allgemeiner Eingang: alles ohne zuständigen AM. Zuordnung per Klick zu Objekt und/oder AM (Audit-Log). */
@@ -79,7 +79,7 @@ export default async function Eingang() {
           {tasks.map((k) => (
             <div key={k.id} className="flex items-start gap-3 text-sm">
               <form action={taskDoneAction.bind(null, Number(k.id), true)}><button className="mt-0.5 h-5 w-5 rounded border border-line bg-white" aria-label="Abhaken" /></form>
-              <div>{k.text}<div className="text-xs text-muted"><Link className="underline" href={`/tickets/${k.ticket_id}`}>T-{k.ticket_id}</Link> · {k.sender_name || k.sender_email}</div></div>
+              <div><TaskText text={k.text} /><div className="text-xs text-muted"><Link className="underline" href={`/tickets/${k.ticket_id}`}>T-{k.ticket_id}</Link> · {k.sender_name || k.sender_email}</div></div>
             </div>
           ))}
         </section>
