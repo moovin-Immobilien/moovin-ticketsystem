@@ -157,7 +157,7 @@ export function evaluateSignals(i: EvaluateInput): Evaluation {
       .filter((a) => { const ms = new Date(a.starts_at).getTime() - now.getTime(); return ms > -2 * 3600_000 && ms < 48 * 3600_000; })
       .sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0];
     if (soon && (tb || terminIntent)) add({ type: "termin_bald", stage: 2, confirmed: true, basis: "daten", why: `Termin ${fmtWhen(soon.starts_at)} (in < 48 h)`, evidence: tb?.evidence, appointment_at: soon.starts_at });
-  } else if (tb) add({ type: "termin_bald", stage: 2, confirmed: false, basis: "mail", why: "Termin heute/morgen (laut Mail)", evidence: tb.evidence });
+  } else if (tb && /\b(heute|morgen|today|tomorrow|tonight)\b/i.test(tb.evidence ?? "")) add({ type: "termin_bald", stage: 2, confirmed: false, basis: "mail", why: "Termin heute/morgen (laut Mail)", evidence: tb.evidence });
 
   // 6 · Rückzug in später Phase (Daten: Status besichtigt/beim Eigentümer/Zusage)
   const rs = raw.get("rueckzug_spaet");
@@ -166,9 +166,10 @@ export function evaluateSignals(i: EvaluateInput): Evaluation {
     if (late && (rs || i.intent === "rueckzug")) add({ type: "rueckzug_spaet", stage: 2, confirmed: true, basis: "daten", why: `Abschluss-Risiko: Rückzug (Status ${late.status === "beim_eigentuemer" ? "beim Eigentümer" : late.status}) – nächsten Kandidaten aktivieren`, evidence: rs?.evidence });
   } else if (rs) add({ type: "rueckzug_spaet", stage: 2, confirmed: false, basis: "mail", why: "Rückzug nach Besichtigung (laut Mail) – nächsten Kandidaten prüfen", evidence: rs.evidence });
 
-  // 7 · Eskalation (Text genügt)
+  // 7 · Eskalation (Text genügt) – nur bei Anliegen, für die moovin zuständig ist
   const e = raw.get("eskalation");
-  if (e || i.intent === "beschwerde") add({ type: "eskalation", stage: 2, confirmed: true, basis: "mail", why: "Eskalation – Teamleitung informiert", evidence: e?.evidence });
+  const zustaendig = !["nicht_zustaendig", "spam", "intern_system"].includes(i.intent);
+  if (zustaendig && (e || i.intent === "beschwerde")) add({ type: "eskalation", stage: 2, confirmed: true, basis: "mail", why: "Eskalation – Teamleitung informiert", evidence: e?.evidence });
 
   // 8 · Nachgehakt (Verlauf)
   if (i.unansweredInbound >= 2) add({ type: "nachgehakt", stage: 2, confirmed: true, basis: "daten", why: `${i.unansweredInbound} Mails ohne Antwort`, evidence: "" });
