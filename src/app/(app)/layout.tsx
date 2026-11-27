@@ -5,6 +5,7 @@ import { demoMode } from "@/lib/env";
 import { moovinEnabled } from "@/lib/settings";
 import { logoutAction } from "../login/actions";
 import { toggleTestTicketsAction } from "./simulieren/actions";
+import { NavLinks, type NavItem } from "@/components/NavLinks";
 
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   const agent = await requireAgent();
@@ -14,7 +15,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
       (select count(*) from ticket.tickets t where t.assignee_email is null and t.status not in ('beantwortet','geschlossen') and t.merged_into is null and ${testSql(showTests)}) as eingang,
       (select count(*) from ticket.agents where not active and approved_at is null) as pending,
       exists (select 1 from ticket.tickets where is_test) as has_tests`;
-  const nav: { href: string; label: string; count?: number }[] = [
+  const nav: NavItem[] = [
     { href: "/mein", label: "Mein Bereich" },
     { href: "/eingang", label: "Allgemeiner Eingang", count: Number(c.eingang) },
     { href: "/tickets", label: "Alle Tickets" },
@@ -33,13 +34,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
             <img src="/moovin-logo.svg" alt="moovin" className="h-6" />
             <span className="hidden 2xl:inline text-sm font-semibold text-navy border-l border-line pl-3">Tickets</span>
           </Link>
-          <nav className="flex gap-0.5 text-sm">
-            {nav.map((n) => (
-              <Link key={n.href} href={n.href} className="px-2.5 py-1.5 rounded-lg text-muted hover:text-navy hover:bg-canvas whitespace-nowrap">
-                {n.label}{n.count ? <span className="ml-1.5 rounded-full bg-pink px-1.5 text-[11px] font-semibold text-white tabular-nums">{n.count}</span> : null}
-              </Link>
-            ))}
-          </nav>
+          <NavLinks items={nav} />
           <div className="ml-auto flex items-center gap-3 text-sm">
             {c.has_tests && (
               <form action={toggleTestTicketsAction.bind(null, !showTests)}>
