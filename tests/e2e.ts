@@ -272,13 +272,17 @@ async function testbatterie(admin: Page, lena: Page) {
     const [dact] = await sql`select id from ticket.actions where ticket_id = ${d.id} and type = 'datenschutz_weiterleiten'`;
     assert(dact, "keine Datenschutz-Aktion");
     await sendFromUi(admin, Number(d.id), { awaitReply: false });
+    // Datenschutzteam liest per CC der Antwort mit; die separate Weiterleitung entfällt (Paket 2, D.4)
     const [d2] = await sql`select status, result from ticket.actions where id = ${dact.id}`;
-    assert(d2.status === "ausgefuehrt" && d2.result.delivery === "simuliert", JSON.stringify(d2));
+    assert(d2.status === "ausgefuehrt" && d2.result.skipped === true, JSON.stringify(d2));
+    const [dOut] = await sql`select cc_email, delivery_status from ticket.messages where ticket_id = ${d.id} and direction = 'out'`;
+    assert(dOut.cc_email === "datenschutz@moovin.de" && dOut.delivery_status === "simuliert", JSON.stringify(dOut));
     assert(brevo.sent.length === sentBefore, `Brevo aufgerufen: ${JSON.stringify(brevo.sent.slice(sentBefore).map((m) => (m as { to: unknown }).to))}`);
     const outs = await sql`select delivery_status from ticket.messages where ticket_id in (${t.id}, ${d.id}) and direction = 'out'`;
     assert(outs.length === 2 && outs.every((m) => m.delivery_status === "simuliert"), JSON.stringify(outs));
     const locks = await sql`select detail from ticket.audit_log where ticket_id in (${t.id}, ${d.id}) and kind = 'mail_out'`;
-    assert(locks.length === 4 && locks.every((l) => l.detail.mode === "test_gesperrt"), JSON.stringify(locks.map((l) => l.detail)));
+    assert(locks.length === 3 && locks.every((l) => l.detail.mode === "test_gesperrt"), JSON.stringify(locks.map((l) => l.detail)));
+    assert(locks.some((l) => Array.isArray(l.detail.cc) && l.detail.cc.includes("datenschutz@moovin.de")), "CC an den Datenschutz fehlt im Audit");
     assert(locks.some((l) => String(l.detail.to).endsWith("@moovin.de") && l.detail.reason === "Testticket"), "interne Mail nicht über das Kennzeichen gesperrt");
     assert((await moovinWrites()) === writesBefore, "Schreibaufruf an moovin");
   });
@@ -989,16 +993,31 @@ async function main() {
       assert((await jonas.locator('[data-testid="task-list"] > div').first().innerText()).includes("Abschluss-Chance"), "Aufgabe nicht oben");
       assert(Number(await jonas.locator('[data-testid="count-chancen"]').innerText()) >= 1, "Zähler Chancen");
     });
-    await check("Fall D: „Vielen Dank, bis Montag!“ → Stufe 4 ganz unten, kein Entwurf, „Ohne Antwort schließen“", async () => {
+    await check("Fall D: „Vielen Dank, bis Montag!“ → Stufe 4 ganz unten, kurzer Entwurf mit Login-Hinweis, „Ohne Antwort schließen“", async () => {
       const t = await mailIn({ from: "mehmet.yilmaz@example.org", name: "Mehmet Yilmaz", subject: "Danke", text: "Vielen Dank, bis Montag!" });
       assert(Number(t.id) === mehmetId && t.priority === 4 && t.status === "entwurf", JSON.stringify({ id: t.id, p: t.priority, s: t.status }));
       const [d] = await sql`select body_text from ticket.drafts where ticket_id = ${mehmetId} order by id desc limit 1`;
-      assert(!d.body_text.trim(), `Entwurf: ${d.body_text}`);
+      assert(/app\.moovin\.de\/r\/login/.test(d.body_text) && !/Ansprechpartner meldet sich/.test(d.body_text), `Entwurf: ${d.body_text}`);
       await jonas.goto(`${BASE}/mein?tab=todo`);
       const last = jonas.locator("tbody tr").last();
       assert((await last.getAttribute("data-testid")) === `row-${mehmetId}` && (await last.innerText()).includes("Kein Handlungsbedarf"), "nicht unten");
       await jonas.click(`[data-testid="close-${mehmetId}"]`);
       await until(async () => (await sql`select status from ticket.tickets where id = ${mehmetId}`)[0].status === "geschlossen");
+    });
+    await check("Spam und Abwesenheitsnotiz → automatisch geschlossen, kein Entwurf, nicht im Eingang; echte Antwort öffnet wieder", async () => {
+      const before = Number((await sql`select coalesce(max(id),0) as m from ticket.tickets`)[0].m);
+      await postBrevo([brevoItem({ from: "sales@seo-agentur.example", name: "SEO Agentur", subject: "Backlinks für moovin.de", text: "Wir bieten Ihnen 500 Backlinks und SEO Rankings zum Festpreis." }),
+                       brevoItem({ from: "ole.bergmann@example.org", name: "Ole Bergmann", subject: "Automatische Antwort: Ihre Anfrage", text: "Abwesenheitsnotiz: Ich bin bis 05.12. nicht erreichbar und melde mich danach." })]);
+      const rows = await until(async () => { const r = await sql`select id, intent, status, auto_closed, sender_email from ticket.tickets where id > ${before} and status = 'geschlossen'`; return r.length === 2 ? r : null; });
+      assert(rows.every((r) => r.auto_closed && ["spam", "intern_system"].includes(r.intent)), JSON.stringify(rows));
+      const spam = rows.find((r) => r.sender_email === "sales@seo-agentur.example")!;
+      assert(!(await sql`select 1 from ticket.drafts where ticket_id = ${spam.id} and status = 'offen'`).length, "offener Entwurf bei Spam");
+      assert((await sql`select 1 from ticket.audit_log where ticket_id = ${spam.id} and detail->>'event' = 'automatisch_geschlossen'`).length, "Audit fehlt");
+      await lena.goto(`${BASE}/eingang`);
+      assert(await lena.locator(`[data-testid="eingang-${spam.id}"]`).count() === 0, "Spam im Eingang");
+      const ole = rows.find((r) => r.sender_email === "ole.bergmann@example.org")!;
+      const back = await mailIn({ from: "ole.bergmann@example.org", name: "Ole Bergmann", subject: `Re: Ihre Anfrage [#T-${ole.id}]`, text: "Jetzt bin ich wieder da – ich suche eine 2-Zimmer-Wohnung in Hamburg, haben Sie etwas für mich?" });
+      assert(Number(back.id) === Number(ole.id) && back.status === "entwurf" && !back.auto_closed, JSON.stringify({ id: back.id, s: back.status, a: back.auto_closed }));
     });
     let chanceId = 0;
     await check("Fall C: Anmietwunsch nach Besichtigung → nie automatisch (auch bei Auto), Stufe 1 ganz oben mit „Warum oben?“", async () => {
