@@ -37,13 +37,14 @@
 | `audit_log` | Insert-only (Trigger verhindert Update/Delete) |
 | `sessions` | Login-Sitzungen (12 h) |
 | `oauth_states` | Kurzlebiger Zustand des Google-Logins (state, nonce, PKCE) |
-| `tasks` | Aufgaben für AMs (Verschiebewunsch, Rückzug, Interesse, Notiz, nachfassen), offen/erledigt |
+| `tasks` | Aufgaben für AMs – **höchstens eine offene je Ticket**: erste Zeile = Titel (dringendster Punkt), weitere Zeilen = Checkliste („• …“). Neue Punkte (Aktionen, Signale, Folgemails) werden ergänzt statt neu angelegt (`createTask` in `src/lib/workflow.ts`); Priorität/Fälligkeit = das Dringendste |
 | `notes` | Interne Notizen und Weitergaben – nie an Bewerber, moovin oder KI |
 | `presence` | Wer hat ein Ticket gerade offen (Bearbeitungssperre, nur Anzeige) |
 | `crm_objects` | Spiegel aus Zoho CRM: Objekt (moovin-ID/Adresse) → AM-Name und -Adresse, Phase, „in Vermarktung“; täglicher Abgleich |
 | `settings` | Schalter und Stände, z. B. `moovin_api` (an/aus), `crm_sync` (letzter Abgleich), `signals_off` (abgeschaltete Signale) |
 | `signal_feedback` | „Markierung passt nicht“ je Ticket und Signal → Trefferquote (Ticket-Intelligenz) |
 | `test_results` | Testbatterie: Ergebnis je Lauf und Fall (Soll aus `src/lib/testbatterie.json`, Ist = Stand des Tickets direkt nach dem Fall, Fehler, Dauer); wird mit dem Ticket gelöscht |
+| `test_runs` | Testbatterie: Plan je Lauf (Objekt je Fall), damit ein abgebrochener Lauf mit denselben Objekten fortgesetzt werden kann („Fehlende Fälle nachladen“) |
 
 Testtickets: `tickets.is_test` (boolean, Standard `false`, Index) wird in `processInbound` beim **Anlegen** des Tickets gesetzt – also
 bevor `analyzeTicket` läuft; Folgemails im selben Thread erben es über das Ticket. Testmails threaden nur in Testtickets desselben Laufs
@@ -57,7 +58,7 @@ bestätigt, Basis Daten/Mail), `chance_at`/`chance_answered_at`/`chance_won_at` 
 
 ## Autonomie-Entscheidung
 Auto-Versand nur wenn: Intent-Modus `auto` ∧ nicht gesperrt ∧ Konfidenz ≥ Schwelle ∧ `needs_human = false` ∧
-Absender in moovin bekannt (bei moovin-Anbindung aus: nur allgemeine Anliegen) ∧ Antwort nicht leer und ohne `[AM: …]` ∧
+Absender in moovin bekannt (bei moovin-Anbindung aus: nur allgemeine Anliegen) ∧ Antwort nicht leer und ohne `[AM: …]`-Hinweis (Sicherheitsnetz; der Prompt erzeugt keine Platzhalter mehr) ∧
 keine Aufgaben-Aktionen ∧ (keine Aktionen ∨ Absender verifiziert) ∧ keine KI-/moovin-Fehler ∧ kein Signal aus Fall C/D
 (Anmietwunsch, Vertrag, Frist, Eskalation, kein Handlungsbedarf) ∧ kein Testticket.
 Messgröße für die Freischaltung: Anteil Entwürfe, die ein AM mit ≥ 97 % Wortähnlichkeit versendet hat (Ziel ≥ 90 %, min. 20 Fälle).
@@ -68,7 +69,9 @@ Messgröße für die Freischaltung: Anteil Entwürfe, die ein AM mit ≥ 97 % Wo
 3. moovin-API: HMAC + Zeitstempel (Replay-Schutz 5 min) + `X-Subject-Email`-Bindung + Idempotenz (keine IP-Allowlist).
 4. Claude-Werkzeuge ohne freie Parameter für Personen; Objekt-Abfrage nur für Objekte des Absenders.
 5. Aktionen werden serverseitig gegen den moovin-Kontext validiert (nur IDs des Absenders).
-6. Antwortadresse aus moovin, nie aus der Mail. `[AM: …]`-Platzhalter blockieren den Versand.
+6. Antwortadresse aus moovin, nie aus der Mail. Ein `[AM: …]`-Hinweis im Text blockiert den Versand (Sicherheitsnetz). Der Prompt erzeugt keine
+   Platzhalter: Fehlt eine Information, formuliert die KI so, dass der Satz ohne sie richtig ist, und behauptet nie, etwas sei in moovin
+   vermerkt oder erledigt, wenn keine Aktion das wirklich tut. Abläufe, die je Objekt abweichen (Vertragsweg, Kaution, Übergabe), nur allgemein.
 7. Login nur über Google Workspace (hd=moovin.de, PKCE, Nonce, nur openid/email/profile); neue Adressen erst nach Freischaltung.
 8. Rollen im UI (AM sieht eigene/Allgemeiner Eingang/Überfällige), Audit-Log, Security-Header.
 9. **Testsperre** (`deliver()` in `src/lib/mailer.ts`, vor jedem Versanddienst): Ist das Ticket `is_test` (aus der Datenbank gelesen, nicht vom
