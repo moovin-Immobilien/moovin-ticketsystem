@@ -90,12 +90,14 @@ Nicht eindeutig → keine Terminaktion, Rückfrage an den Bewerber.
 
 ### 4.6 Oberfläche (AM)
 - **Login:** nur Google (Workspace moovin.de, `hd`-Prüfung, PKCE, Nonce). Erstanmeldung unbekannter Adresse → Antrag, Admin schaltet unter **Team** frei.
-- **Mein Bereich** (Startseite), vier Reiter mit Zähler:
+- **Mein Bereich** (Startseite), fünf Reiter mit Zähler:
   - *Zu erledigen:* Entwürfe zur Freigabe und Handantworten, Überfällige oben.
-  - *Offene Aufgaben:* Tabelle `tasks`; automatisch bei Verschiebewunsch, Rückzug, Interesse und jeder Notiz-Aktion; Abhaken im Ticketsystem.
+  - *Offene Aufgaben:* Tabelle `tasks`; **eine Aufgabe je Ticket** als Checkliste – Punkte entstehen bei Verschiebewunsch, Rückzug, Interesse,
+    Notiz-Aktion und Signalen (Fall B) und werden an die bestehende Aufgabe angehängt; Abhaken im Ticketsystem.
   - *Wartet auf Bewerber:* Tickets mit Rückfrage (Häkchen beim Senden, von der KI vorbelegt). Antwort des Bewerbers holt sie zurück.
     Nach 7 Tagen ohne Antwort: Aufgabe „nachfassen“ für den AM (täglicher Cron), keine Mail an den Bewerber.
   - *Automatisch erledigt:* Auto-Antworten, Filter nach Anliegen, „gegengelesen“ markieren, Auto-Quote (30 Tage) oben.
+  - *Erledigt:* von mir beantwortete oder geschlossene Tickets der letzten 30 Tage (nicht automatische), neueste oben, „Wiedereröffnen“.
 - **Allgemeiner Eingang:** alles ohne zuständigen AM (unbekannter Absender, ohne Objekt, nicht zuständig, AM abwesend ohne Vertretung).
   Mit Grund (z. B. „gehört laut CRM zu … – noch nicht freigeschaltet“). Zuordnung per Klick zu Objekt und/oder AM; ohne AM-Auswahl
   übernimmt der AM laut CRM, sonst der AM, der das Objekt zuletzt betreut hat. Audit-Log.
@@ -154,12 +156,14 @@ Anzahl Termin-Absagen (→ No-Show-Effekt), offene/überfällige Tickets.
 ### 4.11 Livetest ohne moovin-API (Schalter „moovin-Anbindung“)
 - Admin schaltet unter **Team → Objekte & Zuordnung** um (Standard über `MOOVIN_API_MODE`, `an`/`aus`). Hinweisleiste für alle.
 - **Aus:** keine Abfragen und keine Schreibaufrufe an moovin, keine Kopie in moovin. Zuordnung nur über das CRM (4.7).
-- Die KI arbeitet ohne Bewerberdaten: Sie schreibt nie, die Adresse sei unbekannt, sondern setzt `[AM: …]`-Platzhalter für persönliche
-  Angaben (Stand, Termin, Treffpunkt). Allgemeine Fragen beantwortet sie wie sonst.
+- Die KI arbeitet ohne Bewerberdaten: Sie schreibt nie, die Adresse sei unbekannt, nennt keine persönlichen Angaben (Stand, Termin,
+  Treffpunkt) und setzt keine Platzhalter – sie formuliert neutral und versandfertig (z. B. Verweis auf Profil/Login), der AM prüft den
+  Entwurf (`needs_human`). Allgemeine Fragen beantwortet sie wie sonst.
 - Vorgeschlagene Aktionen (Unterlagen, Termin bestätigen/absagen, Rückzug, Interesse, Notiz) gehen nicht an moovin, sondern werden
   nach der Freigabe zu **Aufgaben** für den AM; der Verschiebewunsch geht wie immer per Mail an den AM.
 - Antworten gehen an die Absenderadresse (es gibt keine hinterlegte Adresse aus moovin); persönliche Angaben ergänzt der AM nur nach Prüfung in moovin.
-- Auto-Versand nur für allgemeine Anliegen (Wohnungssuche, Datenschutz, Login) und nie mit Platzhalter oder Aufgabe.
+  Der Entwurf behauptet nie, etwas sei in moovin vermerkt oder erledigt; „geben wir weiter“/„legen wir ab“ nur für Punkte, die der AM beim Freigeben als Aufgabe erledigt.
+- Auto-Versand nur für allgemeine Anliegen (Wohnungssuche, Datenschutz, Login) und nie mit Aufgabe.
 - **An:** Verhalten wie zuvor; das CRM ergänzt nur, wenn moovin keinen AM liefert.
 
 ### 4.12 Ticket-Intelligenz: Chancen erkennen, richtig sortieren
