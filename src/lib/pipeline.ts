@@ -106,7 +106,7 @@ export async function processInbound(mail: InboundMail, actor = "webhook", warni
     await sql`update ticket.tickets set status = 'neu', sender_verified = ${verification.verified}, last_inbound_at = ${now},
               due_at = case when status in ('beantwortet','geschlossen','wartet') then ${dueDate(now)} else due_at end,
               reopened_at = case when status = 'geschlossen' then ${now} else reopened_at end,
-              waiting_since = null, waiting_reminded_at = null, closed_at = null, updated_at = now() where id = ${ticketId}`;
+              waiting_since = null, waiting_reminded_at = null, closed_at = null, auto_closed = false, updated_at = now() where id = ${ticketId}`;
     if (prev?.status === "geschlossen") {
       await audit(actor, "ticket", { event: "wiedereroeffnet" }, ticketId);
       await addNote(ticketId, "system", "Neue Mail des Bewerbers – Ticket wurde wieder geöffnet.", "system");
@@ -144,9 +144,10 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
     const notice = SYSTEM_NOTICE.test(ticket.sender_email);
     const ev = evaluateSignals({ raw: [], intent: "intern_system", attachments: [], ctx: null, moovinOn: true, unansweredInbound: 0, actionCount: 0, systemNotice: notice });
     await sql`update ticket.tickets set intent = 'intern_system', confidence = null, summary = 'System- oder interne Absenderadresse – keine KI-Verarbeitung.',
-              needs_human = true, needs_human_reason = 'System-/interne Mail', status = 'neu', priority = ${ev.priority}, signals = ${sql.json(ev.signals as never)},
+              needs_human = false, needs_human_reason = null, status = 'entwurf', priority = ${ev.priority}, signals = ${sql.json(ev.signals as never)},
               updated_at = now() where id = ${ticketId}`;
     await audit("system", "ticket", { event: "system_absender_uebersprungen" }, ticketId);
+    if (msgs.filter((m) => m.direction === "in").length === 1) await autoClose(ticketId, "Systemmail (Bounce/Benachrichtigung)");
     return;
   }
 
@@ -347,6 +348,13 @@ export async function analyzeTicket(ticketId: number, actor = "system", warnings
   await audit(actor === "system" ? "ki" : actor, "ki_call", { model: out.model, intent: r.intent, confidence: r.confidence, needs_human: r.needs_human, tools: out.toolCalls, usage: out.usage, aiError, auto, moovin: moovinOn ? "an" : "aus" }, ticketId);
   if (crm?.how) await audit("system", "ticket", { event: "objekt_erkannt", how: crm.how, object: crm.object?.object_id ?? null, candidates: crm.candidates.length, am: crm.amEmail, assigned: !!crmAgent && !ticket.assignee_email }, ticketId);
 
+  // Spam und Systemmails (Bounce, Abwesenheitsnotiz, Newsletter) werden ohne AM geschlossen; eine echte Antwort öffnet das Ticket wie üblich wieder.
+  // Nur bei der ersten Mail eines Tickets – eine Abwesenheitsnotiz auf eine laufende Unterhaltung schließt nichts (Stufe 4, AM entscheidet).
+  if (AUTO_CLOSE_INTENTS.includes(r.intent) && msgs.filter((m) => m.direction === "in").length === 1) {
+    await autoClose(ticketId, r.intent === "spam" ? "Spam" : "Systemmail/Abwesenheitsnotiz");
+    return;
+  }
+
   if (auto) {
     const acts = await sql`select id from ticket.actions where draft_id = ${draft.id} and status = 'vorgeschlagen'`;
     try {
@@ -380,7 +388,7 @@ function actionLabel(a: ProposedAction, ctx: ApplicantContext | null, isTest = f
     case "termin_verschieben_wunsch": return `Verschiebewunsch für Termin ${when} per Mail an den AM: „${a.text.slice(0, 120)}“`;
     case "interesse_setzen": return a.interest === "zurueckgezogen" ? `Rückzug als Notiz an Bewerbung ${a.application_id} (${app?.object_title ?? ""}) – AM zieht in moovin zurück` : `Interesse als Notiz an Bewerbung ${a.application_id} vermerken`;
     case "notiz": return `Notiz: „${a.text.slice(0, 140)}“`;
-    case "datenschutz_weiterleiten": return `An ${env.datenschutzAddress()} weiterleiten${a.text ? `: „${a.text.slice(0, 120)}“` : ""}`;
+    case "datenschutz_weiterleiten": return `Datenschutzteam informieren – ${env.datenschutzAddress()} erhält die Antwort automatisch in Kopie${a.text ? `: „${a.text.slice(0, 120)}“` : ""}`;
   }
 }
 
@@ -412,11 +420,13 @@ export async function sendDraft(opts: { ticketId: number; draftId: number; actor
   const messageId = newMessageId(ticketId);
   const references = [lastIn?.references_hdr, lastIn?.mail_message_id].filter(Boolean).join(" ") || null;
 
-  const { delivery, providerMessageId } = await sendMailDetailed({ to, subject, text: finalText, inReplyTo: lastIn?.mail_message_id ?? null, references, messageId, ticketId });
+  // Datenschutz-Anliegen: das Datenschutzteam liest automatisch mit (CC) – ersetzt die separate Weiterleitung (Feedback-Paket 2, D.4)
+  const cc = ticket.intent === "konto_datenschutz" ? [env.datenschutzAddress()] : [];
+  const { delivery, providerMessageId } = await sendMailDetailed({ to, cc, subject, text: finalText, inReplyTo: lastIn?.mail_message_id ?? null, references, messageId, ticketId });
   if (delivery === "fehler") throw new Error("Versand fehlgeschlagen – bitte erneut versuchen");
 
-  await sql`insert into ticket.messages (ticket_id, direction, from_email, to_email, subject, body_text, mail_message_id, provider_message_id, in_reply_to, references_hdr, sent_by, delivery_status)
-    values (${ticketId}, 'out', ${env.inboundAddress()}, ${to}, ${subject}, ${finalText}, ${messageId}, ${providerMessageId}, ${lastIn?.mail_message_id ?? null}, ${references}, ${actor}, ${delivery})`;
+  await sql`insert into ticket.messages (ticket_id, direction, from_email, to_email, cc_email, subject, body_text, mail_message_id, provider_message_id, in_reply_to, references_hdr, sent_by, delivery_status)
+    values (${ticketId}, 'out', ${env.inboundAddress()}, ${to}, ${cc.join(",") || null}, ${subject}, ${finalText}, ${messageId}, ${providerMessageId}, ${lastIn?.mail_message_id ?? null}, ${references}, ${actor}, ${delivery})`;
 
   const sim = similarity(draft.body_text, finalText);
   await sql`update ticket.drafts set status = 'gesendet', final_text = ${finalText}, similarity = ${sim}, unchanged = ${sim >= UNCHANGED_THRESHOLD},
@@ -512,6 +522,9 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
         }, a.idempotency_key);
         break;
       case "datenschutz_weiterleiten": {
+        // Hat die Antwort an den Bewerber das Datenschutzteam schon per CC erreicht, ist keine zweite Mail nötig
+        const [ccSent] = await sql`select 1 from ticket.messages where ticket_id = ${a.ticket_id} and direction = 'out' and cc_email ilike ${"%" + env.datenschutzAddress() + "%"} limit 1`;
+        if (ccSent) { result = { skipped: true, reason: `Datenschutzteam per CC (${env.datenschutzAddress()}) informiert` }; break; }
         const [m] = await sql`select m.from_email, m.from_name, m.subject, m.body_text, m.created_at, m.sender_verified
                               from ticket.drafts d join ticket.messages m on m.id = d.in_message_id where d.id = ${a.draft_id}`;
         const to = env.datenschutzAddress();
@@ -547,6 +560,17 @@ export async function executeAction(actionId: number, actor: string): Promise<{ 
     await audit(actor, "action", { type: a.type, ok: false, error: msg }, Number(a.ticket_id));
     return { id: actionId, ok: false, error: msg };
   }
+}
+
+/** Anliegen, die ohne AM automatisch geschlossen werden (Feedback-Paket 2, D.10). */
+export const AUTO_CLOSE_INTENTS = ["spam", "intern_system"];
+
+async function autoClose(ticketId: number, reason: string) {
+  await sql`update ticket.drafts set status = 'verworfen', decided_by = 'system', decided_at = now() where ticket_id = ${ticketId} and status = 'offen'`;
+  await sql`update ticket.actions set status = 'verworfen' where ticket_id = ${ticketId} and status in ('vorgeschlagen','blockiert')`;
+  await sql`update ticket.tickets set status = 'geschlossen', closed_at = now(), needs_human = false, needs_human_reason = null, auto_closed = true,
+            priority = 4, updated_at = now() where id = ${ticketId}`;
+  await audit("system", "ticket", { event: "automatisch_geschlossen", reason }, ticketId);
 }
 
 export async function closeTicket(ticketId: number, actor: string) {
